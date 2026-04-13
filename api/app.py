@@ -1,4 +1,4 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Body
 from pydantic import BaseModel
 
 from models.predict import predict
@@ -14,6 +14,9 @@ class MatchInput(BaseModel):
     market_edge: float
 
 
+# =========================
+# SINGLE MATCH PREDICTION
+# =========================
 @app.post("/predict")
 def predict_endpoint(data: MatchInput):
 
@@ -26,17 +29,28 @@ def predict_endpoint(data: MatchInput):
     return predict(features)
 
 
+# =========================
+# LIVE PREDICTIONS
+# =========================
 @app.get("/live")
 async def live_predictions():
     return await run_live_predictions()
 
 
-# 🟢 NEW: BACKTEST ENDPOINT
+# =========================
+# BACKTEST (FIXED)
+# =========================
 @app.post("/backtest")
-def backtest_endpoint(dataset: list):
+async def backtest_endpoint(dataset: list = Body(...)):
 
-    import pandas as pd
+    """
+    Expected input:
+    [
+        {
+            "features": [0.1, 0.2, 0.3],
+            "label": 1
+        }
+    ]
+    """
 
-    df = pd.DataFrame(dataset)
-
-    return run_backtest(df)
+    return run_backtest(dataset)
