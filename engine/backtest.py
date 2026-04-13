@@ -9,8 +9,8 @@ def run_backtest(df):
     - home_form
     - away_form
     - market_edge
-    - result (0/1/2)
-    - odds_home / odds_away (optional)
+    - result (0=home, 1=draw, 2=away)
+    - odds_home / odds_draw / odds_away (optional)
     """
 
     portfolio = Portfolio(bankroll=1000)
@@ -25,26 +25,34 @@ def run_backtest(df):
 
         probs = predict(features)
 
-        # pick best side
-        home_prob = probs["home_win"]
-        away_prob = probs["away_win"]
+        home_p = probs["home_win"]
+        draw_p = probs["draw"]
+        away_p = probs["away_win"]
 
-        if home_prob > away_prob:
-            prob = home_prob
-            odds = row.get("odds_home", 2.0)
-            bet = "HOME"
-        else:
-            prob = away_prob
-            odds = row.get("odds_away", 2.0)
-            bet = "AWAY"
+        # 🎯 pick best value bet (EV-based selection)
+        bets = [
+            ("HOME", home_p, row.get("odds_home", 2.0)),
+            ("DRAW", draw_p, row.get("odds_draw", 3.2)),
+            ("AWAY", away_p, row.get("odds_away", 2.0)),
+        ]
+
+        best_bet = max(bets, key=lambda x: x[1] * x[2])
+
+        bet_type, prob, odds = best_bet
 
         stake = portfolio.kelly_stake(prob, odds)
 
         if stake <= 0:
             continue
 
-        # result mapping (binary simplification)
-        won = (row["result"] == (1 if bet == "HOME" else 0))
+        # 🧠 result mapping (correct 3-way system)
+        result_map = {
+            0: "HOME",
+            1: "DRAW",
+            2: "AWAY"
+        }
+
+        won = (result_map[row["result"]] == bet_type)
 
         portfolio.update(stake, odds, won)
 
