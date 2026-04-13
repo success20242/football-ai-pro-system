@@ -3,16 +3,16 @@ from data.football_api import get_live_matches
 from models.predict import predict
 
 def build_live_features(match):
-    """
-    Convert API match → model features
-    (TEMP simple version, we improve later)
-    """
 
-    home_form = 0.5   # placeholder
-    away_form = 0.5   # placeholder
+    home_team = match["homeTeam"]["name"]
+    away_team = match["awayTeam"]["name"]
 
-    # basic heuristic (will replace with real stats later)
-    market_edge = 0.0
+    # 🔥 TEMP smarter logic (better than static)
+    home_form = hash(home_team) % 100 / 100
+    away_form = hash(away_team) % 100 / 100
+
+    # simulate market difference
+    market_edge = (home_form - away_form) * 0.1
 
     return [home_form, away_form, market_edge]
 
