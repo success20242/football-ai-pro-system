@@ -1,35 +1,50 @@
 import asyncio
+import random
+
 from data.football_api import get_live_matches
 from models.predict import predict
 
+
 def build_live_features(match):
+    """
+    Simulated realistic football features (temporary)
+    """
 
-    home_team = match["homeTeam"]["name"]
-    away_team = match["awayTeam"]["name"]
+    # ⚽ simulate attacking strength
+    home_goals_avg = random.uniform(0.8, 2.2)
+    away_goals_avg = random.uniform(0.8, 2.2)
 
-    # 🔥 TEMP smarter logic (better than static)
-    home_form = hash(home_team) % 100 / 100
-    away_form = hash(away_team) % 100 / 100
+    # 🛡️ simulate defensive weakness
+    home_concede_avg = random.uniform(0.8, 2.0)
+    away_concede_avg = random.uniform(0.8, 2.0)
 
-    # simulate market difference
-    market_edge = (home_form - away_form) * 0.1
+    # 📊 form proxy (attack - defense)
+    home_form = home_goals_avg - home_concede_avg
+    away_form = away_goals_avg - away_concede_avg
 
-    return [home_form, away_form, market_edge]
+    # 🧠 momentum (relative strength)
+    momentum = home_form - away_form
+
+    # 💰 market edge proxy
+    market_edge = momentum * 0.2
+
+    return [
+        float(home_form),
+        float(away_form),
+        float(market_edge)
+    ]
 
 
 async def run_live_predictions():
 
     data = await get_live_matches()
-
     matches = data.get("matches", [])
 
     results = []
 
     for match in matches:
-
         try:
             features = build_live_features(match)
-
             prediction = predict(features)
 
             results.append({
