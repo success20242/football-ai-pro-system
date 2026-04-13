@@ -1,38 +1,13 @@
 import asyncio
-import random
+import pandas as pd
 
 from data.football_api import get_live_matches
 from models.predict import predict
+from features.real_features import build_real_features
 
 
-def build_live_features(match):
-    """
-    Simulated realistic football features (temporary)
-    """
-
-    # ⚽ simulate attacking strength
-    home_goals_avg = random.uniform(0.8, 2.2)
-    away_goals_avg = random.uniform(0.8, 2.2)
-
-    # 🛡️ simulate defensive weakness
-    home_concede_avg = random.uniform(0.8, 2.0)
-    away_concede_avg = random.uniform(0.8, 2.0)
-
-    # 📊 form proxy (attack - defense)
-    home_form = home_goals_avg - home_concede_avg
-    away_form = away_goals_avg - away_concede_avg
-
-    # 🧠 momentum (relative strength)
-    momentum = home_form - away_form
-
-    # 💰 market edge proxy
-    market_edge = momentum * 0.2
-
-    return [
-        float(home_form),
-        float(away_form),
-        float(market_edge)
-    ]
+# 📊 Load historical dataset (used for real feature calculation)
+df = pd.read_csv("data/matches.csv")
 
 
 async def run_live_predictions():
@@ -44,12 +19,17 @@ async def run_live_predictions():
 
     for match in matches:
         try:
-            features = build_live_features(match)
+            home_team = match["homeTeam"]["name"]
+            away_team = match["awayTeam"]["name"]
+
+            # 🔥 REAL FEATURES (replaces fake/random)
+            features = build_real_features(df, home_team, away_team)
+
             prediction = predict(features)
 
             results.append({
-                "home_team": match["homeTeam"]["name"],
-                "away_team": match["awayTeam"]["name"],
+                "home_team": home_team,
+                "away_team": away_team,
                 "prediction": prediction
             })
 
