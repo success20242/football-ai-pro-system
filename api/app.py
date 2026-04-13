@@ -3,7 +3,8 @@ from pydantic import BaseModel
 
 from models.predict import predict
 from engine.live_predictor import run_live_predictions
-from engine.betting_engine import run_betting_engine  # 🔥 NEW (betting engine)
+from engine.betting_engine import run_betting_engine
+from engine.institutional_engine import run_institutional_engine  # 🔥 NEW
 
 app = FastAPI()
 
@@ -41,8 +42,16 @@ async def live_predictions():
 
 
 # =========================
-# 💰 BETTING ENGINE (NEW)
+# 💰 BETTING ENGINE
 # =========================
 @app.get("/bets")
 async def bets():
     return await run_betting_engine()
+
+
+# =========================
+# 🏦 INSTITUTIONAL ENGINE (NEW)
+# =========================
+@app.get("/institutional")
+async def institutional():
+    return await run_institutional_engine()
