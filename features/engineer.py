@@ -41,6 +41,49 @@ def compute_elo(df, k=20, base=1500):
 # =========================
 # PRO FEATURE ENGINE
 # =========================
+import pandas as pd
+import numpy as np
+
+
+# =========================
+# ELO SYSTEM
+# =========================
+def compute_elo(df, k=20, base=1500):
+    teams = {}
+
+    def get(team):
+        return teams.get(team, base)
+
+    home_elos = []
+    away_elos = []
+
+    for _, row in df.iterrows():
+
+        home = row["home_team"]
+        away = row["away_team"]
+
+        home_elo = get(home)
+        away_elo = get(away)
+
+        home_elos.append(home_elo)
+        away_elos.append(away_elo)
+
+        exp_home = 1 / (1 + 10 ** ((away_elo - home_elo) / 400))
+
+        result = row["result"]
+
+        teams[home] = home_elo + k * (result - exp_home)
+        teams[away] = away_elo + k * ((1 - result) - (1 - exp_home))
+
+    df["home_elo"] = home_elos
+    df["away_elo"] = away_elos
+
+    return df
+
+
+# =========================
+# PRO FEATURE ENGINE
+# =========================
 def build_features(df):
 
     # -------------------------
