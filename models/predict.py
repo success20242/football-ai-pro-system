@@ -9,6 +9,7 @@ def predict(features):
     probs = model.predict_proba(features)[0]
 
     return {
-        "loss": float(probs[0]),
-        "win": float(probs[1])
+        "away_win": float(probs[0]),
+        "draw": float(probs[1]),
+        "home_win": float(probs[2])
     }
