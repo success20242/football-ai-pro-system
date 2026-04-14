@@ -1,20 +1,11 @@
-import math
 from data.odds_api import get_odds
 from models.predict import predict
 
 
-# =========================
-# ODDS → PROBABILITY
-# =========================
 def odds_to_prob(odds: float):
-    if odds <= 1:
-        return 0
-    return 1 / odds
+    return 1 / odds if odds > 1 else 0
 
 
-# =========================
-# KELLY CRITERION (RISK SIZING)
-# =========================
 def kelly(prob, odds):
     if odds <= 1:
         return 0
@@ -23,24 +14,16 @@ def kelly(prob, odds):
     q = 1 - prob
 
     f = (b * prob - q) / b
+    return max(0, min(f, 0.25))
 
-    return max(0, min(f, 0.25))  # cap risk at 25% bankroll
 
-
-# =========================
-# EDGE CALCULATION
-# =========================
 def calc_edge(model_prob, market_prob):
     return model_prob - market_prob
 
 
-# =========================
-# MAIN INSTITUTIONAL ENGINE
-# =========================
 async def run_institutional_engine():
 
     odds_data = await get_odds()
-
     results = []
 
     for match in odds_data:
@@ -55,31 +38,29 @@ async def run_institutional_engine():
 
             outcomes = bookmakers[0]["markets"][0]["outcomes"]
 
-            home_odds = next(o["price"] for o in outcomes if o["name"] == home)
-            away_odds = next(o["price"] for o in outcomes if o["name"] == away)
-            draw_odds = next(o["price"] for o in outcomes if o["name"] == "Draw")
+            def find_odds(name):
+                for o in outcomes:
+                    if o["name"] == name:
+                        return o["price"]
+                return None
 
-            # -------------------------
-            # MARKET PROBABILITIES
-            # -------------------------
-            market_home = odds_to_prob(home_odds)
-            market_away = odds_to_prob(away_odds)
-            market_draw = odds_to_prob(draw_odds)
+            home_odds = find_odds(home)
+            away_odds = find_odds(away)
+            draw_odds = find_odds("Draw")
 
-            # normalize (important)
-            total = market_home + market_draw + market_away
+            if not all([home_odds, away_odds, draw_odds]):
+                continue
 
             market_probs = {
-                "home": market_home / total,
-                "draw": market_draw / total,
-                "away": market_away / total
+                "home": odds_to_prob(home_odds),
+                "draw": odds_to_prob(draw_odds),
+                "away": odds_to_prob(away_odds)
             }
 
-            # -------------------------
-            # MODEL PREDICTION (REAL FEATURES LATER)
-            # -------------------------
-            features = [0.5, 0.5, 0.0]  # placeholder until API-linked features
-            model = predict(features)
+            total = sum(market_probs.values())
+            market_probs = {k: v / total for k, v in market_probs.items()}
+
+            model = predict([0.5, 0.5, 0.0])
 
             model_probs = {
                 "home": model["home_win"],
@@ -87,36 +68,27 @@ async def run_institutional_engine():
                 "away": model["away_win"]
             }
 
-            # -------------------------
-            # EDGE CALCULATION
-            # -------------------------
-            edge_home = calc_edge(model_probs["home"], market_probs["home"])
-            edge_draw = calc_edge(model_probs["draw"], market_probs["draw"])
-            edge_away = calc_edge(model_probs["away"], market_probs["away"])
+            edges = {
+                k: calc_edge(model_probs[k], market_probs[k])
+                for k in model_probs
+            }
 
-            # -------------------------
-            # BEST BET
-            # -------------------------
-            best = max(
-                [("HOME", edge_home, home_odds, model_probs["home"]),
-                 ("DRAW", edge_draw, draw_odds, model_probs["draw"]),
-                 ("AWAY", edge_away, away_odds, model_probs["away"])],
-                key=lambda x: x[1]
-            )
+            best_key = max(edges, key=edges.get)
 
-            # -------------------------
-            # KELLY STAKING
-            # -------------------------
-            stake = kelly(best[3], best[2])
+            odds_map = {
+                "home": home_odds,
+                "draw": draw_odds,
+                "away": away_odds
+            }
+
+            stake = kelly(model_probs[best_key], odds_map[best_key])
 
             results.append({
                 "match": f"{home} vs {away}",
-                "best_bet": best[0],
-                "edge": float(best[1]),
-                "odds": best[2],
-                "model_prob": best[3],
-                "market_probs": market_probs,
-                "stake_fraction": float(stake)
+                "best_bet": best_key.upper(),
+                "edge": edges[best_key],
+                "odds": odds_map[best_key],
+                "stake": stake
             })
 
         except Exception:
