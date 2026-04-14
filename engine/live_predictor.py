@@ -45,8 +45,15 @@ async def build_features(match, odds_map):
 # =========================
 async def run_live_predictions():
 
-    matches_data = await get_live_matches()
-    odds_data = await get_odds()
+   matches_data = await get_live_matches()
+
+matches = matches_data.get("matches", [])
+
+# 🔥 fallback if no live matches
+if not matches:
+    from data.football_api import get_upcoming_matches
+    matches_data = await get_upcoming_matches()
+    matches = matches_data.get("matches", [])
 
     matches = matches_data.get("matches", []) if isinstance(matches_data, dict) else []
 
@@ -67,6 +74,31 @@ async def run_live_predictions():
     clean_results = [r for r in results if isinstance(r, dict)]
 
     return clean_results
+
+async def get_upcoming_matches():
+    data = await fetch("fixtures", {"next": 10})
+
+    if not data or "response" not in data:
+        return {"matches": []}
+
+    matches = []
+
+    for m in data["response"]:
+        matches.append({
+            "id": m["fixture"]["id"],
+            "league": m["league"]["name"],
+            "timestamp": m["fixture"]["date"],
+            "homeTeam": {
+                "id": m["teams"]["home"]["id"],
+                "name": m["teams"]["home"]["name"]
+            },
+            "awayTeam": {
+                "id": m["teams"]["away"]["id"],
+                "name": m["teams"]["away"]["name"]
+            }
+        })
+
+    return {"matches": matches}
 
 
 async def process_match(match, odds_map):
