@@ -1,56 +1,47 @@
-from features.market_model import (
-    odds_to_prob,
-    normalize,
-    market_strength,
-    implied_xg
-)
+import asyncio
+from data.football_api import get_team_stats
+from features.market_model import market_vector
+
 
 # =========================
-# FEATURE ENGINE (FINAL)
+# TEAM STRENGTH (ELO-LITE)
+# =========================
+def team_strength(team_data: dict):
+    squad = team_data.get("squad", [])
+    base = len(squad)
+
+    return min(1.5, max(0.2, base / 25))
+
+
+# =========================
+# FINAL FEATURE ENGINE
 # =========================
 async def build_real_features(match, odds_map=None):
 
-    match_id = match.get("id")
+    home_id = match["homeTeam"]["id"]
+    away_id = match["awayTeam"]["id"]
 
-    odds = {}
-    if odds_map and match_id in odds_map:
-        odds = odds_map[match_id]
+    home_data, away_data = await asyncio.gather(
+        get_team_stats(home_id),
+        get_team_stats(away_id)
+    )
 
-    home_odds = odds.get("home", 2.0)
-    draw_odds = odds.get("draw", 3.2)
-    away_odds = odds.get("away", 2.0)
+    home_strength = team_strength(home_data)
+    away_strength = team_strength(away_data)
 
-    # =========================
-    # IMPLIED PROBABILITY
-    # =========================
-    home_p = odds_to_prob(home_odds)
-    draw_p = odds_to_prob(draw_odds)
-    away_p = odds_to_prob(away_odds)
-
-    home_p, draw_p, away_p = normalize(home_p, draw_p, away_p)
-
-    # =========================
-    # MARKET STRENGTH (ELO-LIKE)
-    # =========================
-    home_strength, away_strength = market_strength(home_odds, away_odds)
-
-    # =========================
-    # IMPLIED xG
-    # =========================
-    home_xg, away_xg = implied_xg(home_p, away_p)
-
-    # =========================
-    # CORE SIGNALS
-    # =========================
     strength_diff = home_strength - away_strength
-    xg_diff = home_xg - away_xg
-    market_bias = home_p - away_p
 
-    # =========================
-    # FINAL FEATURE VECTOR
-    # =========================
+    odds = odds_map.get(match.get("id"), {}) if odds_map else {}
+
+    mv = market_vector(
+        odds.get("home", 2.0),
+        odds.get("draw", 3.2),
+        odds.get("away", 2.0)
+    )
+
     return [
-        float(strength_diff),
-        float(xg_diff),
-        float(market_bias)
+        strength_diff,
+        mv["strength_diff"],
+        mv["xg_diff"],
+        mv["market_entropy"]
     ]
