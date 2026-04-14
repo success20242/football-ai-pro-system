@@ -2,149 +2,77 @@ import asyncio
 import pandas as pd
 
 from data.football_api import get_fixtures
-from data.odds_api import get_odds
 from data.xg_api import get_team_xg
+from data.odds_api import get_odds
+from utils.odds_utils import build_odds_map
 
 
 # =========================
-# RESULT MAPPING (REAL LABELS)
-# =========================
-def get_result_label(home_goals, away_goals):
-    if home_goals > away_goals:
-        return 0  # home win
-    elif home_goals == away_goals:
-        return 1  # draw
-    else:
-        return 2  # away win
-
-
-# =========================
-# ODDS MAPPING
-# =========================
-def build_odds_map(odds_data):
-    """
-    Converts odds API response into:
-    { match_id: {home, draw, away} }
-    """
-    odds_map = {}
-
-    for match in odds_data:
-        try:
-            bookmakers = match.get("bookmakers", [])
-            if not bookmakers:
-                continue
-
-            outcomes = bookmakers[0]["markets"][0]["outcomes"]
-
-            home = next(o for o in outcomes if o["name"] != "Draw")
-            draw = next(o for o in outcomes if o["name"] == "Draw")
-            away = next(o for o in outcomes if o["name"] != home["name"])
-
-            odds_map[match["id"]] = {
-                "home": home["price"],
-                "draw": draw["price"],
-                "away": away["price"]
-            }
-
-        except Exception:
-            continue
-
-    return odds_map
-
-
-# =========================
-# FEATURE BUILDER
-# =========================
-async def build_match_features(match, odds_map):
-    home_id = match["homeTeam"]["id"]
-    away_id = match["awayTeam"]["id"]
-
-    # -------------------------
-    # xG FEATURES (REAL SIGNAL)
-    # -------------------------
-    home_xg = await get_team_xg(home_id)
-    away_xg = await get_team_xg(away_id)
-
-    home_form = home_xg["xg_for"] - home_xg["xg_against"]
-    away_form = away_xg["xg_for"] - away_xg["xg_against"]
-
-    # -------------------------
-    # MARKET EDGE (ODDS)
-    # -------------------------
-    odds = odds_map.get(match["id"], None)
-
-    if odds:
-        home_prob = 1 / odds["home"]
-        draw_prob = 1 / odds["draw"]
-        away_prob = 1 / odds["away"]
-
-        total = home_prob + draw_prob + away_prob
-
-        home_prob /= total
-        away_prob /= total
-
-        market_edge = home_prob - away_prob
-    else:
-        market_edge = 0.0
-
-    return [
-        float(home_form),
-        float(away_form),
-        float(market_edge)
-    ]
-
-
-# =========================
-# MAIN DATASET BUILDER
+# BUILD REAL TRAINING DATASET
 # =========================
 async def build_dataset(competition="PL", limit=200):
-    """
-    Builds REAL ML dataset:
-    xG + odds + historical results
-    """
 
-    print("📊 Fetching historical matches...")
-
-    fixtures = await get_fixtures(competition)
+    fixtures_data = await get_fixtures(competition)
     odds_data = await get_odds()
 
-    matches = fixtures.get("matches", [])[:limit]
+    fixtures = fixtures_data.get("matches", [])[:limit]
 
     odds_map = build_odds_map(odds_data)
 
     dataset = []
 
-    print(f"⚙️ Processing {len(matches)} matches...")
-
-    for match in matches:
+    for match in fixtures:
 
         try:
-            score = match.get("score", {})
-            full_time = score.get("fullTime", {})
+            home_id = match["homeTeam"]["id"]
+            away_id = match["awayTeam"]["id"]
 
-            home_goals = full_time.get("home")
-            away_goals = full_time.get("away")
+            home_xg = await get_team_xg(home_id)
+            away_xg = await get_team_xg(away_id)
 
-            # skip unfinished matches
-            if home_goals is None or away_goals is None:
+            # -------------------------
+            # REAL xG FEATURES
+            # -------------------------
+            home_form = home_xg["xg_for"] - home_xg["xg_against"]
+            away_form = away_xg["xg_for"] - away_xg["xg_against"]
+
+            # -------------------------
+            # ODDS FEATURES
+            # -------------------------
+            match_odds = odds_map.get(match["id"], {})
+
+            home_odds = match_odds.get("home", 2.0)
+            draw_odds = match_odds.get("draw", 3.2)
+            away_odds = match_odds.get("away", 3.0)
+
+            market_edge = (1 / home_odds) - (1 / away_odds)
+
+            # -------------------------
+            # LABEL (historical result)
+            # -------------------------
+            score = match.get("score", {}).get("fullTime", {})
+
+            if not score:
                 continue
 
-            features = await build_match_features(match, odds_map)
-
-            label = get_result_label(home_goals, away_goals)
+            if score["home"] > score["away"]:
+                result = 0
+            elif score["home"] == score["away"]:
+                result = 1
+            else:
+                result = 2
 
             dataset.append({
-                "home_form": features[0],
-                "away_form": features[1],
-                "market_edge": features[2],
-                "result": label
+                "home_form": home_form,
+                "away_form": away_form,
+                "market_edge": market_edge,
+                "odds_home": home_odds,
+                "odds_draw": draw_odds,
+                "odds_away": away_odds,
+                "result": result
             })
 
         except Exception:
             continue
 
-    df = pd.DataFrame(dataset)
-
-    print(f"✅ Dataset built: {len(df)} samples")
-
-    return df
+    return pd.DataFrame(dataset)
