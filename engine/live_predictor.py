@@ -1,88 +1,19 @@
 import asyncio
 
 from data.football_api import get_live_matches, get_upcoming_matches
-from data.xg_api import get_team_xg
 from data.odds_api import get_odds
 from utils.odds_utils import extract_match_probs
 from models.predict import predict
+from features.real_features import build_real_features
 
 
 # =========================
-# SAFE xG HANDLER (IMPROVED)
-# =========================
-def safe_xg(xg):
-    if not xg:
-        # small realistic baseline (NOT constant collapse)
-        return {
-            "xg_for": 1.3,
-            "xg_against": 1.3
-        }
-
-    return {
-        "xg_for": float(xg.get("xg_for", 1.3)),
-        "xg_against": float(xg.get("xg_against", 1.3))
-    }
-
-
-# =========================
-# FEATURE BUILDER
+# FEATURE BUILDER (CLEAN)
 # =========================
 async def build_features(match, odds_map):
 
-    try:
-        home_id = match["homeTeam"]["id"]
-        away_id = match["awayTeam"]["id"]
-
-        # -------------------------
-        # xG FETCH
-        # -------------------------
-        home_xg, away_xg = await asyncio.gather(
-            get_team_xg(home_id),
-            get_team_xg(away_id)
-        )
-
-        home_xg = safe_xg(home_xg)
-        away_xg = safe_xg(away_xg)
-
-        home_form = home_xg["xg_for"] - home_xg["xg_against"]
-        away_form = away_xg["xg_for"] - away_xg["xg_against"]
-
-        form_diff = home_form - away_form
-        avg_form = (home_form + away_form) / 2
-
-        momentum = form_diff * 0.6 + avg_form * 0.2
-
-        # -------------------------
-        # MARKET SIGNAL (FIXED)
-        # -------------------------
-        market_edge = 0.0
-
-        match_id = match.get("id")
-
-        odds_data = odds_map.get(match_id)
-
-        if odds_data:
-            probs = extract_match_probs(odds_data)
-
-            if probs:
-                # TRUE MARKET IMBALANCE (normalized)
-                market_edge = (
-                    probs["home"] - probs["away"]
-                )
-
-        # -------------------------
-        # FINAL FEATURE VECTOR
-        # -------------------------
-        return [
-            home_form,
-            away_form,
-            form_diff,
-            momentum,
-            market_edge
-        ]
-
-    except Exception as e:
-        raise ValueError(f"Feature build failed: {e}")
+    # 👉 FULLY DELEGATE TO FEATURE ENGINE
+    return await build_real_features(match, odds_map)
 
 
 # =========================
@@ -101,8 +32,9 @@ async def process_match(match, odds_map):
             "away_team": match["awayTeam"]["name"],
             "features": {
                 "vector": features,
-                "form_diff": features[2],
-                "market_edge": features[4]
+                "strength_diff": features[0],
+                "xg_diff": features[1],
+                "market_bias": features[2]
             },
             "prediction": prediction
         }
@@ -131,7 +63,6 @@ async def run_live_predictions():
 
     odds_raw = await get_odds()
 
-    # IMPORTANT FIX: use build_odds_map if available OR fallback-safe mapping
     odds_map = {
         o.get("id"): o
         for o in odds_raw
@@ -155,5 +86,4 @@ async def run_live_predictions():
 # DEBUG
 # =========================
 if __name__ == "__main__":
-    import asyncio
     print(asyncio.run(run_live_predictions()))
