@@ -4,33 +4,35 @@ from pydantic import BaseModel
 from models.predict import predict
 from engine.live_predictor import run_live_predictions
 from engine.backtest import run_backtest
+from features.real_features import build_real_features
+from data.football_api import get_live_matches
 
 app = FastAPI()
 
 
+# =========================
+# INPUT MODEL (RAW MATCH ONLY)
+# =========================
 class MatchInput(BaseModel):
-    home_form: float
-    away_form: float
-    market_edge: float
+    match: dict
 
 
 # =========================
-# SINGLE MATCH PREDICTION
+# REAL FEATURE PREDICTION
 # =========================
 @app.post("/predict")
-def predict_endpoint(data: MatchInput):
+async def predict_endpoint(data: MatchInput):
 
-    features = [
-        data.home_form,
-        data.away_form,
-        data.market_edge
-    ]
+    match = data.match
+
+    # 🟢 USE REAL FEATURE ENGINE
+    features = await build_real_features(match)
 
     return predict(features)
 
 
 # =========================
-# LIVE PREDICTIONS
+# LIVE PREDICTIONS (REAL PIPELINE)
 # =========================
 @app.get("/live")
 async def live_predictions():
@@ -38,17 +40,17 @@ async def live_predictions():
 
 
 # =========================
-# BACKTEST (FIXED)
+# BACKTEST (REAL FORMAT)
 # =========================
 @app.post("/backtest")
 async def backtest_endpoint(dataset: list = Body(...)):
 
     """
-    Expected input:
+    Expected:
     [
         {
-            "features": [0.1, 0.2, 0.3],
-            "label": 1
+            "match": {...},
+            "label": 0/1/2
         }
     ]
     """
