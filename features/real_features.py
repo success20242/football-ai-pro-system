@@ -28,7 +28,7 @@ async def fetch(url: str, headers=None, params=None):
 
 
 # =========================
-# TEAM STATS
+# TEAM DATA
 # =========================
 async def get_team_stats(team_id: int):
     return await fetch(
@@ -38,7 +38,7 @@ async def get_team_stats(team_id: int):
 
 
 # =========================
-# ODDS API
+# ODDS FETCH
 # =========================
 async def get_odds():
     return await fetch(
@@ -53,65 +53,47 @@ async def get_odds():
 
 
 # =========================
-# INJURY IMPACT (IMPROVED)
+# INJURY IMPACT
 # =========================
-async def get_injury_impact(team_data: dict):
-    """
-    Better proxy: squad depth + missing data penalty
-    """
-
+def injury_score(team_data: dict):
     squad = team_data.get("squad", [])
-
     if not squad:
-        return 0.12  # fallback penalty
+        return 0.1
 
-    squad_size = len(squad)
-
-    # diminishing injury sensitivity
-    return min(0.15, max(0.03, 1.0 / (squad_size ** 0.5)))
-
-
-# =========================
-# ODDS PARSER (FIXED)
-# =========================
-def parse_odds(bookmakers):
-    """
-    Robust extraction of HOME / AWAY / DRAW odds
-    """
-
-    try:
-        if not bookmakers:
-            return {}
-
-        outcomes = bookmakers[0]["markets"][0]["outcomes"]
-
-        odds = {"home": None, "away": None, "draw": None}
-
-        for o in outcomes:
-            name = o.get("name", "").lower()
-
-            if "home" in name:
-                odds["home"] = o["price"]
-
-            elif "away" in name:
-                odds["away"] = o["price"]
-
-            elif "draw" in name or "tie" in name:
-                odds["draw"] = o["price"]
-
-        # fallback safety
-        odds["home"] = odds["home"] or 2.0
-        odds["away"] = odds["away"] or 2.0
-        odds["draw"] = odds["draw"] or 3.2
-
-        return odds
-
-    except Exception:
-        return {"home": 2.0, "away": 2.0, "draw": 3.2}
+    # better scaling (log-based)
+    import math
+    return min(0.2, max(0.02, 1 / (math.log(len(squad) + 2))))
 
 
 # =========================
-# FEATURE ENGINE (CLEAN VERSION)
+# ODDS → FULL PROB VECTOR
+# =========================
+def odds_to_probs(home_odds, draw_odds, away_odds):
+    if not home_odds or not away_odds or not draw_odds:
+        return 0.33, 0.34, 0.33
+
+    h = 1 / home_odds
+    d = 1 / draw_odds
+    a = 1 / away_odds
+
+    total = h + d + a
+
+    return h / total, d / total, a / total
+
+
+# =========================
+# TEAM STRENGTH MODEL (STABLE)
+# =========================
+def team_strength(team_data: dict):
+    squad = team_data.get("squad", [])
+    base = len(squad)
+
+    # normalize aggressively
+    return min(1.5, max(0.2, base / 25))
+
+
+# =========================
+# FEATURE ENGINE (FINAL FIXED VERSION)
 # =========================
 async def build_real_features(match, odds_map=None):
 
@@ -119,7 +101,7 @@ async def build_real_features(match, odds_map=None):
     away_id = match["awayTeam"]["id"]
 
     # -------------------------
-    # TEAM DATA
+    # DATA FETCH
     # -------------------------
     home_data, away_data = await asyncio.gather(
         get_team_stats(home_id),
@@ -127,63 +109,42 @@ async def build_real_features(match, odds_map=None):
     )
 
     # -------------------------
-    # INJURY IMPACT
+    # STRENGTH MODEL
     # -------------------------
-    home_injury, away_injury = await asyncio.gather(
-        get_injury_impact(home_data),
-        get_injury_impact(away_data)
-    )
+    home_strength = team_strength(home_data)
+    away_strength = team_strength(away_data)
+
+    strength_diff = home_strength - away_strength
 
     # -------------------------
-    # CLEAN TEAM STRENGTH PROXY
+    # INJURY MODEL
     # -------------------------
-    home_strength = len(home_data.get("squad", [])) / 25 if home_data else 0.8
-    away_strength = len(away_data.get("squad", [])) / 25 if away_data else 0.8
-
-    # normalize strength
-    home_strength = min(1.2, max(0.3, home_strength))
-    away_strength = min(1.2, max(0.3, away_strength))
+    injury_diff = injury_score(away_data) - injury_score(home_data)
 
     # -------------------------
-    # xG PROXY (STABLE, NOT RANDOM)
+    # ODDS SIGNAL (FULL DISTRIBUTION)
     # -------------------------
-    home_xg = home_strength * (1.2 - away_strength)
-    away_xg = away_strength * (1.2 - home_strength)
-
-    # -------------------------
-    # ODDS SIGNAL (FIXED)
-    # -------------------------
-    odds_data = {}
+    odds = {}
 
     if odds_map:
-        raw_odds = odds_map.get(match.get("id"), {})
-        odds_data = raw_odds
+        odds = odds_map.get(match.get("id"), {}) or {}
 
-    if isinstance(odds_data, dict) and "home" in odds_data:
-        home_odds = odds_data["home"]
-        away_odds = odds_data["away"]
+    home_odds = odds.get("home", 2.0)
+    draw_odds = odds.get("draw", 3.2)
+    away_odds = odds.get("away", 2.0)
 
-        home_prob = 1 / home_odds
-        away_prob = 1 / away_odds
+    market_home, market_draw, market_away = odds_to_probs(
+        home_odds, draw_odds, away_odds
+    )
 
-        total = home_prob + away_prob
-        home_prob /= total
-        away_prob /= total
-
-        market_signal = home_prob - away_prob
-    else:
-        market_signal = 0.0
+    # key signal: market imbalance
+    market_edge = market_home - market_away
 
     # -------------------------
-    # FINAL FEATURES (CLEAN + STABLE)
+    # FINAL FEATURE VECTOR (CLEAN + STRONG)
     # -------------------------
-    form_diff = home_xg - away_xg
-    injury_diff = away_injury - home_injury
-
-    market_edge = market_signal * 0.5
-
     return [
-        float(form_diff),
+        float(strength_diff),
         float(injury_diff),
         float(market_edge)
     ]
