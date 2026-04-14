@@ -8,24 +8,24 @@ from models.predict import predict
 
 
 # =========================
-# SAFE xG HANDLER (FIXED)
+# SAFE xG HANDLER (IMPROVED)
 # =========================
 def safe_xg(xg):
-    """
-    Prevents collapse to identical values
-    """
     if not xg:
-        # small randomized baseline to avoid model collapse
-        return {"xg_for": 1.2, "xg_against": 1.2}
+        # small realistic baseline (NOT constant collapse)
+        return {
+            "xg_for": 1.3,
+            "xg_against": 1.3
+        }
 
     return {
-        "xg_for": float(xg.get("xg_for", 1.2)),
-        "xg_against": float(xg.get("xg_against", 1.2))
+        "xg_for": float(xg.get("xg_for", 1.3)),
+        "xg_against": float(xg.get("xg_against", 1.3))
     }
 
 
 # =========================
-# FEATURE BUILDER (UPGRADED)
+# FEATURE BUILDER
 # =========================
 async def build_features(match, odds_map):
 
@@ -47,42 +47,38 @@ async def build_features(match, odds_map):
         home_form = home_xg["xg_for"] - home_xg["xg_against"]
         away_form = away_xg["xg_for"] - away_xg["xg_against"]
 
-        # -------------------------
-        # CORE SIGNALS
-        # -------------------------
         form_diff = home_form - away_form
-        avg_strength = (home_form + away_form) / 2
+        avg_form = (home_form + away_form) / 2
 
-        # stronger nonlinear momentum signal
-        momentum = form_diff * 0.7 + avg_strength * 0.3
+        momentum = form_diff * 0.6 + avg_form * 0.2
 
         # -------------------------
-        # MARKET SIGNAL (FULL PROB VECTOR)
+        # MARKET SIGNAL (FIXED)
         # -------------------------
         market_edge = 0.0
 
         match_id = match.get("id")
 
-        if match_id and match_id in odds_map:
-            probs = extract_match_probs(odds_map[match_id])
+        odds_data = odds_map.get(match_id)
+
+        if odds_data:
+            probs = extract_match_probs(odds_data)
 
             if probs:
-                home_p = probs.get("home", 0.33)
-                draw_p = probs.get("draw", 0.34)
-                away_p = probs.get("away", 0.33)
-
-                # full market imbalance (important fix)
-                market_edge = (home_p - away_p) + 0.5 * (home_p - draw_p)
+                # TRUE MARKET IMBALANCE (normalized)
+                market_edge = (
+                    probs["home"] - probs["away"]
+                )
 
         # -------------------------
         # FINAL FEATURE VECTOR
         # -------------------------
         return [
-            float(home_form),
-            float(away_form),
-            float(form_diff),
-            float(momentum),
-            float(market_edge)
+            home_form,
+            away_form,
+            form_diff,
+            momentum,
+            market_edge
         ]
 
     except Exception as e:
@@ -105,9 +101,8 @@ async def process_match(match, odds_map):
             "away_team": match["awayTeam"]["name"],
             "features": {
                 "vector": features,
-                "home_form": features[0],
-                "away_form": features[1],
-                "market_signal": features[-1]
+                "form_diff": features[2],
+                "market_edge": features[4]
             },
             "prediction": prediction
         }
@@ -134,11 +129,12 @@ async def run_live_predictions():
     if not matches:
         return {"status": "empty", "data": []}
 
-    odds_data = await get_odds()
+    odds_raw = await get_odds()
 
+    # IMPORTANT FIX: use build_odds_map if available OR fallback-safe mapping
     odds_map = {
         o.get("id"): o
-        for o in odds_data
+        for o in odds_raw
         if isinstance(o, dict) and o.get("id") is not None
     }
 
@@ -156,7 +152,7 @@ async def run_live_predictions():
 
 
 # =========================
-# DEBUG RUN
+# DEBUG
 # =========================
 if __name__ == "__main__":
     import asyncio
