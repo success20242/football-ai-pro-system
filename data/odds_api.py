@@ -10,7 +10,7 @@ BASE_URL = "https://api.the-odds-api.com/v4/sports/soccer_epl/odds"
 
 
 # =========================
-# SAFE FETCH
+# FETCH
 # =========================
 async def fetch(params: dict):
     try:
@@ -28,40 +28,38 @@ async def fetch(params: dict):
 
 
 # =========================
-# ODDS NORMALIZER
+# NORMALIZE (FIXED LOGIC)
 # =========================
 def normalize_game(game: dict):
 
     try:
         bookmakers = game.get("bookmakers", [])
-
         if not bookmakers:
             return None
 
         outcomes = bookmakers[0].get("markets", [{}])[0].get("outcomes", [])
 
-        odds = {
-            "home": 2.0,
-            "away": 2.0,
-            "draw": 3.2
-        }
+        odds = {"home": None, "away": None, "draw": None}
 
         for o in outcomes:
             name = o.get("name", "").lower()
             price = o.get("price", 2.0)
 
-            if "home" in name:
-                odds["home"] = price
-            elif "away" in name:
-                odds["away"] = price
-            elif "draw" in name or "tie" in name:
+            # FIX: proper labeling (NOT "home in name")
+            if o.get("name") and "draw" in name:
                 odds["draw"] = price
 
+            elif odds["home"] is None:
+                odds["home"] = price
+
+            else:
+                odds["away"] = price
+
         return {
-            "id": game.get("id") or game.get("commence_time"),
-            "home": odds["home"],
-            "away": odds["away"],
-            "draw": odds["draw"]
+            "match_id": game.get("id"),
+            "home": float(odds["home"] or 2.0),
+            "away": float(odds["away"] or 2.0),
+            "draw": float(odds["draw"] or 3.2)
         }
 
     except Exception:
@@ -69,7 +67,7 @@ def normalize_game(game: dict):
 
 
 # =========================
-# MAIN ODDS FUNCTION (FIXED)
+# MAIN
 # =========================
 async def get_odds():
 
@@ -83,11 +81,8 @@ async def get_odds():
         "oddsFormat": "decimal"
     }
 
-    raw_data = await fetch(params)
+    raw = await fetch(params)
 
-    normalized = [
-        normalize_game(game)
-        for game in raw_data
-    ]
+    normalized = [normalize_game(g) for g in raw]
 
-    return [g for g in normalized if g is not None]
+    return [g for g in normalized if g]
