@@ -7,10 +7,32 @@ from features.real_features import build_real_features
 
 
 # =========================
-# FEATURE BUILDER (CLEAN)
+# FEATURE BUILDER (SINGLE SOURCE OF TRUTH)
 # =========================
 async def build_features(match, odds_map):
     return await build_real_features(match, odds_map)
+
+
+# =========================
+# SAFE FEATURE NORMALIZER
+# =========================
+def normalize_features(features):
+    """
+    FORCE STABLE VECTOR FOR MODEL
+    """
+
+    if not isinstance(features, list):
+        return [0.0, 0.0, 0.0]
+
+    cleaned = []
+    for f in features:
+        try:
+            cleaned.append(float(f))
+        except Exception:
+            cleaned.append(0.0)
+
+    # enforce EXACT shape for model safety
+    return cleaned[:3] + [0.0] * (3 - len(cleaned))
 
 
 # =========================
@@ -20,6 +42,9 @@ async def process_match(match, odds_map):
 
     try:
         features = await build_features(match, odds_map)
+
+        features = normalize_features(features)
+
         prediction = predict(features)
 
         return {
@@ -29,14 +54,13 @@ async def process_match(match, odds_map):
             "away_team": match["awayTeam"]["name"],
 
             # =========================
-            # FIXED FEATURE MAPPING
+            # FIXED FEATURE OUTPUT
             # =========================
             "features": {
                 "vector": features,
-                "team_strength_diff": features[0],
-                "market_strength_diff": features[1],
-                "xg_diff": features[2],
-                "market_entropy": features[3]
+                "form_diff": features[0],
+                "xg_diff": features[1],
+                "market_bias": features[2]
             },
 
             "prediction": prediction
