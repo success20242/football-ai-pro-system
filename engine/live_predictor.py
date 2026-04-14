@@ -8,13 +8,14 @@ from models.predict import predict
 
 
 # =========================
-# FEATURE BUILDER (REAL DATA ONLY)
+# FEATURE BUILDER
 # =========================
 async def build_features(match, odds_map):
 
     home_id = match["homeTeam"]["id"]
     away_id = match["awayTeam"]["id"]
 
+    # 🔥 parallel xG fetch
     home_xg, away_xg = await asyncio.gather(
         get_team_xg(home_id),
         get_team_xg(away_id)
@@ -25,13 +26,13 @@ async def build_features(match, odds_map):
 
     momentum = home_form - away_form
 
-    market_edge = momentum * 0.1  # fallback ONLY if no odds match
+    # default fallback
+    market_edge = momentum * 0.1
 
     match_id = match.get("id")
 
     if match_id in odds_map:
         probs = extract_match_probs(odds_map[match_id])
-
         if probs:
             market_edge = probs["home"] - probs["away"]
 
@@ -48,8 +49,12 @@ async def run_live_predictions():
 
     matches = matches_data.get("matches", [])
 
-    # FIXED: proper mapping (no utils import needed elsewhere)
-    odds_map = {o.get("id"): o for o in odds_data if isinstance(o, dict)}
+    # ✅ SAFE ODDS MAP
+    odds_map = {
+        o.get("id"): o
+        for o in odds_data
+        if isinstance(o, dict) and o.get("id") is not None
+    }
 
     results = []
 
@@ -67,6 +72,7 @@ async def run_live_predictions():
 
         except Exception as e:
             print(f"⚠️ Error: {e}")
+            continue
 
     return results
 
