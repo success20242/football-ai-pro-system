@@ -16,8 +16,7 @@ from features.real_features import build_real_features
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("football-api")
 
-
-app = FastAPI(title="Football Prediction API", version="2.1")
+app = FastAPI(title="Football Prediction API", version="2.2")
 
 
 # =========================
@@ -52,42 +51,60 @@ def root():
 
 
 # =========================
-# FEATURE NORMALIZER (IMPORTANT FIX)
+# FEATURE NORMALIZER (QUANT STABLE)
 # =========================
 def normalize_features(features):
     """
-    Ensures model stability across different feature versions
+    HARD CONTRACT:
+    model ALWAYS receives 5 features:
+    [strength, injury, market, xg_proxy, momentum]
     """
 
     if not isinstance(features, list):
-        return [0.0, 0.0, 0.0]
+        return [0.0] * 5
 
-    # force numeric safety
     cleaned = []
     for f in features:
         try:
             cleaned.append(float(f))
-        except:
+        except Exception:
             cleaned.append(0.0)
 
-    # FIX: enforce exactly 5 dims (latest engine standard)
+    # enforce EXACT shape
+    cleaned = cleaned[:5]
+
     while len(cleaned) < 5:
         cleaned.append(0.0)
 
-    return cleaned[:5]
+    return cleaned
 
 
 # =========================
-# PREDICT
+# SAFE MATCH CONVERTER
+# =========================
+def safe_match_dict(match_obj):
+    """
+    Fixes: string indices bug + pydantic mismatch safety
+    """
+    if isinstance(match_obj, dict):
+        return match_obj
+    if hasattr(match_obj, "dict"):
+        return match_obj.dict()
+    raise ValueError("Invalid match input format")
+
+
+# =========================
+# PREDICT ENDPOINT
 # =========================
 @app.post("/predict")
 async def predict_endpoint(data: MatchInput):
 
     try:
-        match_dict = data.match.dict()
+        match_dict = safe_match_dict(data.match)
 
         logger.info(f"Predict request: {match_dict}")
 
+        # 🔥 SINGLE SOURCE OF TRUTH (NO DUPLICATE ENGINE LOGIC)
         features = await build_real_features(match_dict)
 
         features = normalize_features(features)
@@ -107,7 +124,7 @@ async def predict_endpoint(data: MatchInput):
 
 
 # =========================
-# LIVE
+# LIVE ENDPOINT
 # =========================
 @app.get("/live")
 async def live_predictions():
@@ -115,11 +132,7 @@ async def live_predictions():
     try:
         results = await run_live_predictions()
 
-        # FIX: correct structure handling
-        if isinstance(results, dict):
-            data = results.get("data", [])
-        else:
-            data = []
+        data = results.get("data", []) if isinstance(results, dict) else []
 
         return {
             "status": "success",
@@ -133,7 +146,7 @@ async def live_predictions():
 
 
 # =========================
-# BACKTEST
+# BACKTEST ENDPOINT
 # =========================
 @app.post("/backtest")
 async def backtest_endpoint(matches: List[Match]):
@@ -142,7 +155,7 @@ async def backtest_endpoint(matches: List[Match]):
         dataset = []
 
         for m in matches:
-            item = m.dict()
+            item = safe_match_dict(m)
 
             item["homeOdds"] = float(item.get("homeOdds") or 2.0)
             item["drawOdds"] = float(item.get("drawOdds") or 3.2)
