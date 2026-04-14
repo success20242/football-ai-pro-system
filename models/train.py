@@ -1,75 +1,118 @@
-import xgboost as xgb
-import joblib
 import asyncio
-import pandas as pd
+import joblib
+import numpy as np
+import xgboost as xgb
+from sklearn.calibration import CalibratedClassifierCV
+from sklearn.model_selection import TimeSeriesSplit
+from sklearn.metrics import accuracy_score, log_loss
 
-from data.build_dataset import build_dataset
-
-
-print("🚀 Building REAL institutional dataset...")
+from features.build_dataset import build_dataset
 
 
 # =========================
-# TRAINING PIPELINE (INSTITUTIONAL VERSION)
+# CONFIG
+# =========================
+FEATURES = [
+    "home_form",
+    "away_form",
+    "market_edge"
+]
+
+
+# =========================
+# TRAINING PIPELINE
 # =========================
 async def main():
 
-    df = await build_dataset("PL")
+    print("🚀 Building REAL dataset...")
+
+    df = await build_dataset("PL", limit=500)
 
     if len(df) < 100:
-        print("⚠️ Not enough real data yet. Need more historical matches.")
+        print("⚠️ Not enough real data yet.")
         return
 
+    X = df[FEATURES].values
+    y = df["result"].values
+
+    print(f"📊 Dataset size: {len(df)}")
+
     # =========================
-    # CLEAN DATA (IMPORTANT)
+    # WALK-FORWARD VALIDATION
     # =========================
-    df = df.dropna()
+    tscv = TimeSeriesSplit(n_splits=5)
 
-    features = [
-        "home_form",
-        "away_form",
-        "market_edge"
-    ]
+    scores = []
+    logloss_scores = []
 
-    X = df[features]
-    y = df["result"]
+    print("🧠 Running walk-forward validation...")
 
-    print("🤖 Training institutional model...")
+    for train_idx, test_idx in tscv.split(X):
 
-    model = xgb.XGBClassifier(
+        X_train, X_test = X[train_idx], X[test_idx]
+        y_train, y_test = y[train_idx], y[test_idx]
+
+        model = xgb.XGBClassifier(
+            max_depth=6,
+            n_estimators=400,
+            learning_rate=0.05,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            eval_metric="mlogloss"
+        )
+
+        model.fit(X_train, y_train)
+
+        preds = model.predict(X_test)
+        probs = model.predict_proba(X_test)
+
+        acc = accuracy_score(y_test, preds)
+        loss = log_loss(y_test, probs)
+
+        scores.append(acc)
+        logloss_scores.append(loss)
+
+        print(f"Fold → Acc: {acc:.3f} | LogLoss: {loss:.3f}")
+
+    print("\n📊 FINAL VALIDATION RESULTS")
+    print(f"Accuracy: {np.mean(scores):.3f}")
+    print(f"LogLoss: {np.mean(logloss_scores):.3f}")
+
+    # =========================
+    # FINAL MODEL TRAINING
+    # =========================
+    print("\n🏁 Training FINAL model...")
+
+    final_model = xgb.XGBClassifier(
         max_depth=6,
         n_estimators=500,
-        learning_rate=0.03,
+        learning_rate=0.05,
         subsample=0.8,
         colsample_bytree=0.8,
         eval_metric="mlogloss"
     )
 
-    # =========================
-    # TIME-AWARE SPLIT (CRITICAL FIX)
-    # =========================
-    split = int(len(df) * 0.8)
-
-    X_train, X_test = X.iloc[:split], X.iloc[split:]
-    y_train, y_test = y.iloc[:split], y.iloc[split:]
-
-    model.fit(X_train, y_train)
+    final_model.fit(X, y)
 
     # =========================
-    # BASIC VALIDATION
+    # PROBABILITY CALIBRATION
     # =========================
-    train_score = model.score(X_train, y_train)
-    test_score = model.score(X_test, y_test)
+    print("🎯 Calibrating probabilities...")
 
-    print(f"📊 Train Accuracy: {train_score:.3f}")
-    print(f"📊 Test Accuracy: {test_score:.3f}")
+    calibrated_model = CalibratedClassifierCV(
+        final_model,
+        method="isotonic",
+        cv=3
+    )
+
+    calibrated_model.fit(X, y)
 
     # =========================
     # SAVE MODEL
     # =========================
-    joblib.dump(model, "models/model.pkl")
+    joblib.dump(calibrated_model, "models/model.pkl")
 
-    print("✅ INSTITUTIONAL MODEL TRAINED & SAVED")
+    print("✅ MODEL TRAINED + CALIBRATED + SAVED")
 
 
 if __name__ == "__main__":
