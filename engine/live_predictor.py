@@ -3,58 +3,54 @@ import asyncio
 from data.football_api import get_live_matches
 from data.xg_api import get_team_xg
 from data.odds_api import get_odds
-from features.odds_features import extract_match_probs
+from utils.odds_utils import build_odds_map
 from models.predict import predict
 
 
 # =========================
-# FEATURE BUILDER (INSTITUTIONAL VERSION)
+# FEATURE ENGINE (NO PLACEHOLDERS)
 # =========================
-async def build_features(match, odds_list):
+async def build_features(match, odds_map):
 
     home_id = match["homeTeam"]["id"]
     away_id = match["awayTeam"]["id"]
 
     # =========================
-    # xG SIGNAL (REAL DATA)
+    # REAL xG SIGNAL
     # =========================
     home_xg = await get_team_xg(home_id)
     away_xg = await get_team_xg(away_id)
 
-    home_form = float(home_xg.get("xg_for", 1.0) - home_xg.get("xg_against", 1.0))
-    away_form = float(away_xg.get("xg_for", 1.0) - away_xg.get("xg_against", 1.0))
-
-    momentum = home_form - away_form
+    home_form = float(
+        home_xg.get("xg_for", 0.0) - home_xg.get("xg_against", 0.0)
+    )
+    away_form = float(
+        away_xg.get("xg_for", 0.0) - away_xg.get("xg_against", 0.0)
+    )
 
     # =========================
-    # MARKET SIGNAL (SAFE MATCHING)
+    # ODDS SIGNAL (STRUCTURED)
     # =========================
-    market_edge = momentum * 0.1  # fallback default
+    match_id = match.get("id")
+    odds = odds_map.get(match_id, None)
 
-    for odds in odds_list:
+    if odds:
+        home_prob = odds["home_prob"]
+        away_prob = odds["away_prob"]
 
-        # try to match by team names (more reliable than ID)
-        if "home_team" in odds and "away_team" in odds:
-
-            if (odds["home_team"] == match["homeTeam"]["name"] and
-                odds["away_team"] == match["awayTeam"]["name"]):
-
-                market_probs = extract_match_probs(odds)
-
-                if market_probs:
-                    market_edge = market_probs["home"] - market_probs["away"]
-
-                break
+        market_edge = home_prob - away_prob
+    else:
+        market_edge = 0.0
 
     return [
         home_form,
         away_form,
-        market_edge
+        float(market_edge)
     ]
 
 
 # =========================
-# LIVE ENGINE
+# LIVE INFERENCE ENGINE
 # =========================
 async def run_live_predictions():
 
@@ -63,27 +59,37 @@ async def run_live_predictions():
 
     matches = matches_data.get("matches", [])
 
+    # IMPORTANT: normalize odds once
+    odds_map = build_odds_map(odds_data)
+
     results = []
 
     for match in matches:
 
         try:
-            features = await build_features(match, odds_data)
+            features = await build_features(match, odds_map)
             prediction = predict(features)
 
             results.append({
                 "home_team": match["homeTeam"]["name"],
                 "away_team": match["awayTeam"]["name"],
-                "prediction": prediction
+                "prediction": prediction,
+                "features": {
+                    "home_form": features[0],
+                    "away_form": features[1],
+                    "market_edge": features[2]
+                }
             })
 
         except Exception as e:
-            print(f"⚠️ Error: {e}")
+            print(f"⚠️ Live engine error: {e}")
             continue
 
     return results
 
 
+# =========================
 # DEBUG
+# =========================
 if __name__ == "__main__":
     print(asyncio.run(run_live_predictions()))
