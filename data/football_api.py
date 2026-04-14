@@ -7,8 +7,8 @@ load_dotenv()
 # =========================
 # API KEYS
 # =========================
-FD_API_KEY = os.getenv("FOOTBALL_DATA_API_KEY")  # football-data.org
-RAPID_API_KEY = os.getenv("FOOTBALL_API_KEY")   # API-Football
+FD_API_KEY = os.getenv("FOOTBALL_DATA_API_KEY")
+RAPID_API_KEY = os.getenv("FOOTBALL_API_KEY")
 ODDS_API_KEY = os.getenv("ODDS_API_KEY")
 
 FD_BASE = "https://api.football-data.org/v4"
@@ -26,7 +26,7 @@ RAPID_HEADERS = {
 
 
 # =========================
-# GENERIC FETCH
+# SAFE FETCH (STRICT)
 # =========================
 async def fetch(url: str, headers=None, params=None):
     try:
@@ -43,24 +43,33 @@ async def fetch(url: str, headers=None, params=None):
 
 
 # =========================
-# NORMALIZERS
+# SAFE RETURN WRAPPER
+# =========================
+def safe_dict(data):
+    return data if isinstance(data, dict) else {}
+
+
+def safe_list(data):
+    return data if isinstance(data, list) else []
+
+
+# =========================
+# NORMALIZERS (FIXED)
 # =========================
 def normalize_fd_match(m):
-    """football-data.org format → unified"""
     try:
         return {
-            "id": m["id"],
-            "league": m["competition"]["name"],
-            "timestamp": m["utcDate"],
-            "status": m["status"],
-
+            "id": m.get("id"),
+            "league": m.get("competition", {}).get("name"),
+            "timestamp": m.get("utcDate"),
+            "status": m.get("status"),
             "homeTeam": {
-                "id": m["homeTeam"]["id"],
-                "name": m["homeTeam"]["name"]
+                "id": m.get("homeTeam", {}).get("id"),
+                "name": m.get("homeTeam", {}).get("name")
             },
             "awayTeam": {
-                "id": m["awayTeam"]["id"],
-                "name": m["awayTeam"]["name"]
+                "id": m.get("awayTeam", {}).get("id"),
+                "name": m.get("awayTeam", {}).get("name")
             }
         }
     except Exception:
@@ -68,21 +77,20 @@ def normalize_fd_match(m):
 
 
 def normalize_rapid_match(m):
-    """API-Football format → unified"""
     try:
         return {
-            "id": m["fixture"]["id"],
-            "league": m["league"]["name"],
-            "timestamp": m["fixture"]["date"],
-            "status": m["fixture"]["status"]["short"],
+            "id": m.get("fixture", {}).get("id"),
+            "league": m.get("league", {}).get("name"),
+            "timestamp": m.get("fixture", {}).get("date"),
+            "status": m.get("fixture", {}).get("status", {}).get("short"),
 
             "homeTeam": {
-                "id": m["teams"]["home"]["id"],
-                "name": m["teams"]["home"]["name"]
+                "id": m.get("teams", {}).get("home", {}).get("id"),
+                "name": m.get("teams", {}).get("home", {}).get("name")
             },
             "awayTeam": {
-                "id": m["teams"]["away"]["id"],
-                "name": m["teams"]["away"]["name"]
+                "id": m.get("teams", {}).get("away", {}).get("id"),
+                "name": m.get("teams", {}).get("away", {}).get("name")
             }
         }
     except Exception:
@@ -90,16 +98,12 @@ def normalize_rapid_match(m):
 
 
 # =========================
-# LIVE MATCHES (SMART HYBRID)
+# LIVE MATCHES (HYBRID)
 # =========================
 async def get_live_matches():
-    """
-    Try API-Football first (better live data),
-    fallback to football-data.org
-    """
 
     # -------------------------
-    # 1. TRY RAPID API (BEST)
+    # RAPID API (PRIMARY)
     # -------------------------
     if RAPID_API_KEY:
         data = await fetch(
@@ -108,19 +112,19 @@ async def get_live_matches():
             params={"live": "all"}
         )
 
-        if data and "response" in data:
-            matches = [
-                normalize_rapid_match(m)
-                for m in data["response"]
-            ]
+        matches = safe_list(data.get("response") if data else [])
 
-            matches = [m for m in matches if m]
+        cleaned = [
+            normalize_rapid_match(m)
+            for m in matches
+        ]
 
-            if matches:
-                return {"matches": matches}
+        cleaned = [m for m in cleaned if m]
+        if cleaned:
+            return {"matches": cleaned}
 
     # -------------------------
-    # 2. FALLBACK: FOOTBALL-DATA
+    # FOOTBALL-DATA (FALLBACK)
     # -------------------------
     if FD_API_KEY:
         data = await fetch(
@@ -129,25 +133,23 @@ async def get_live_matches():
             params={"status": "LIVE"}
         )
 
-        if data and "matches" in data:
-            matches = [
-                normalize_fd_match(m)
-                for m in data["matches"]
-            ]
+        matches = safe_list(data.get("matches") if data else [])
 
-            matches = [m for m in matches if m]
+        cleaned = [
+            normalize_fd_match(m)
+            for m in matches
+        ]
 
-            return {"matches": matches}
+        return {"matches": [m for m in cleaned if m]}
 
     return {"matches": []}
 
 
 # =========================
-# UPCOMING MATCHES (FALLBACK)
+# UPCOMING MATCHES
 # =========================
 async def get_upcoming_matches():
 
-    # try Rapid first
     if RAPID_API_KEY:
         data = await fetch(
             f"{RAPID_BASE}/fixtures",
@@ -155,26 +157,27 @@ async def get_upcoming_matches():
             params={"next": 10}
         )
 
-        if data and "response" in data:
-            matches = [normalize_rapid_match(m) for m in data["response"]]
-            return {"matches": [m for m in matches if m]}
+        matches = safe_list(data.get("response") if data else [])
 
-    # fallback football-data
+        cleaned = [normalize_rapid_match(m) for m in matches]
+        return {"matches": [m for m in cleaned if m]}
+
     if FD_API_KEY:
         data = await fetch(
             f"{FD_BASE}/matches",
             headers=FD_HEADERS
         )
 
-        if data and "matches" in data:
-            matches = [normalize_fd_match(m) for m in data["matches"]]
-            return {"matches": [m for m in matches if m]}
+        matches = safe_list(data.get("matches") if data else [])
+
+        cleaned = [normalize_fd_match(m) for m in matches]
+        return {"matches": [m for m in cleaned if m]}
 
     return {"matches": []}
 
 
 # =========================
-# TEAM STATS (UNIFIED)
+# TEAM STATS (CLEANED OUTPUT)
 # =========================
 async def get_team_stats(team_id: int):
 
@@ -183,7 +186,7 @@ async def get_team_stats(team_id: int):
             f"{FD_BASE}/teams/{team_id}",
             headers=FD_HEADERS
         )
-        return data or {}
+        return safe_dict(data)
 
     if RAPID_API_KEY:
         data = await fetch(
@@ -191,27 +194,27 @@ async def get_team_stats(team_id: int):
             headers=RAPID_HEADERS,
             params={"id": team_id}
         )
-        return data or {}
+        return safe_dict(data)
 
     return {}
 
 
 # =========================
-# ODDS (UNCHANGED BUT ALIGNED)
+# ODDS (NORMALIZED OUTPUT)
 # =========================
 async def get_match_odds(sport="soccer_epl"):
 
     if not ODDS_API_KEY:
         return []
 
-    url = f"https://api.the-odds-api.com/v4/sports/{sport}/odds"
-
-    return await fetch(
-        url,
+    data = await fetch(
+        f"https://api.the-odds-api.com/v4/sports/{sport}/odds",
         headers={},
         params={
             "apiKey": ODDS_API_KEY,
             "regions": "eu",
             "markets": "h2h"
         }
-    ) or []
+    )
+
+    return safe_list(data)
