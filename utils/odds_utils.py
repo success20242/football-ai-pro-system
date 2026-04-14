@@ -29,53 +29,64 @@ def normalize_probs(home: float, draw: float, away: float):
 
 
 # =========================
-# SAFE ODDS PARSER (FIXED)
+# SAFE ODDS PARSER (ROBUST FIX)
 # =========================
 def extract_match_probs(match_odds: dict):
 
     try:
-        bookmakers = match_odds.get("bookmakers", [])
-        if not bookmakers:
+        if not isinstance(match_odds, dict):
             return None
 
-        outcomes = bookmakers[0].get("markets", [{}])[0].get("outcomes", [])
-        if not outcomes:
+        bookmakers = match_odds.get("bookmakers")
+        if not bookmakers or not isinstance(bookmakers, list):
+            return None
+
+        markets = bookmakers[0].get("markets")
+        if not markets or not isinstance(markets, list):
+            return None
+
+        outcomes = markets[0].get("outcomes")
+        if not outcomes or not isinstance(outcomes, list):
             return None
 
         home_odds = None
         away_odds = None
         draw_odds = None
 
-        # -------------------------
-        # FLEXIBLE MATCHING LOGIC
-        # -------------------------
+        # =========================
+        # SMART DETECTION LOGIC
+        # =========================
         for o in outcomes:
 
-            name = o.get("name", "").lower()
-            price = o.get("price", 0)
+            if not isinstance(o, dict):
+                continue
 
-            # HOME detection
-            if "home" in name:
-                home_odds = price
+            name = str(o.get("name", "")).lower()
+            price = o.get("price", None)
 
-            # AWAY detection
-            elif "away" in name:
-                away_odds = price
+            if price is None:
+                continue
 
-            # DRAW detection
-            elif "draw" in name or "tie" in name:
+            # draw detection
+            if "draw" in name or "tie" in name:
                 draw_odds = price
 
-        # -------------------------
-        # FALLBACK SAFETY
-        # -------------------------
+            # fallback: first non-draw = home, second = away
+            elif home_odds is None:
+                home_odds = price
+            else:
+                away_odds = price
+
+        # =========================
+        # SAFETY FALLBACKS
+        # =========================
         home_odds = home_odds or 2.0
         away_odds = away_odds or 2.0
         draw_odds = draw_odds or 3.2
 
-        # -------------------------
+        # =========================
         # CONVERT TO PROBABILITIES
-        # -------------------------
+        # =========================
         probs = {
             "home": odds_to_prob(home_odds),
             "draw": odds_to_prob(draw_odds),
@@ -89,7 +100,7 @@ def extract_match_probs(match_odds: dict):
 
 
 # =========================
-# ODDS MAP BUILDER (SAFE)
+# ODDS MAP BUILDER (STABLE)
 # =========================
 def build_odds_map(odds_list: list):
 
@@ -105,7 +116,7 @@ def build_odds_map(odds_list: list):
 
         match_id = o.get("id")
 
-        if match_id is None:
+        if not match_id:
             continue
 
         odds_map[match_id] = o
