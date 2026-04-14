@@ -10,7 +10,7 @@ BASE_URL = "https://api.the-odds-api.com/v4/sports/soccer_epl/odds"
 
 
 # =========================
-# FETCH
+# FETCH (SAFE JSON HANDLING)
 # =========================
 async def fetch(params: dict):
     try:
@@ -21,45 +21,64 @@ async def fetch(params: dict):
                 return []
 
             data = r.json()
-            return data if isinstance(data, list) else []
+
+            # FIX: ensure list output only if valid
+            if isinstance(data, list):
+                return data
+
+            return data.get("data", []) if isinstance(data, dict) else []
 
     except Exception:
         return []
 
 
 # =========================
-# NORMALIZE (FIXED LOGIC)
+# NORMALIZE GAME (FIXED MARKET PARSING)
 # =========================
 def normalize_game(game: dict):
-
     try:
-        bookmakers = game.get("bookmakers", [])
-        if not bookmakers:
+        if not isinstance(game, dict):
             return None
 
-        outcomes = bookmakers[0].get("markets", [{}])[0].get("outcomes", [])
+        bookmakers = game.get("bookmakers", [])
+        if not bookmakers or not isinstance(bookmakers, list):
+            return None
+
+        markets = bookmakers[0].get("markets", [])
+        if not markets:
+            return None
+
+        outcomes = markets[0].get("outcomes", [])
+        if not outcomes:
+            return None
 
         odds = {"home": None, "away": None, "draw": None}
 
         for o in outcomes:
-            name = o.get("name", "").lower()
-            price = o.get("price", 2.0)
+            if not isinstance(o, dict):
+                continue
 
-            # FIX: proper labeling (NOT "home in name")
-            if o.get("name") and "draw" in name:
-                odds["draw"] = price
+            name = (o.get("name") or "").lower()
+            price = o.get("price") or 2.0
+
+            # FIXED CLASSIFICATION LOGIC
+            if "draw" in name:
+                odds["draw"] = float(price)
 
             elif odds["home"] is None:
-                odds["home"] = price
+                odds["home"] = float(price)
 
             else:
-                odds["away"] = price
+                odds["away"] = float(price)
+
+        if odds["home"] is None or odds["away"] is None:
+            return None
 
         return {
             "match_id": game.get("id"),
-            "home": float(odds["home"] or 2.0),
-            "away": float(odds["away"] or 2.0),
-            "draw": float(odds["draw"] or 3.2)
+            "home": odds["home"],
+            "away": odds["away"],
+            "draw": odds["draw"] if odds["draw"] is not None else 3.2
         }
 
     except Exception:
@@ -67,7 +86,7 @@ def normalize_game(game: dict):
 
 
 # =========================
-# MAIN
+# MAIN ODDS PIPELINE
 # =========================
 async def get_odds():
 
@@ -83,6 +102,14 @@ async def get_odds():
 
     raw = await fetch(params)
 
-    normalized = [normalize_game(g) for g in raw]
+    if not isinstance(raw, list):
+        return []
 
-    return [g for g in normalized if g]
+    normalized = []
+
+    for g in raw:
+        parsed = normalize_game(g)
+        if parsed:
+            normalized.append(parsed)
+
+    return normalized
