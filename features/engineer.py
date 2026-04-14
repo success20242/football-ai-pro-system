@@ -2,10 +2,11 @@ import pandas as pd
 import numpy as np
 
 
-# =========================
-# ELO SYSTEM
-# =========================
+# =====================================================
+# ELO SYSTEM (CLEAN + DETERMINISTIC)
+# =====================================================
 def compute_elo(df, k=20, base=1500):
+
     teams = {}
 
     def get(team):
@@ -13,6 +14,9 @@ def compute_elo(df, k=20, base=1500):
 
     home_elos = []
     away_elos = []
+
+    # IMPORTANT: enforce time order (CRITICAL FIX)
+    df = df.sort_values(by=df.columns[0]).reset_index(drop=True)
 
     for _, row in df.iterrows():
 
@@ -25,9 +29,10 @@ def compute_elo(df, k=20, base=1500):
         home_elos.append(home_elo)
         away_elos.append(away_elo)
 
+        # expected score
         exp_home = 1 / (1 + 10 ** ((away_elo - home_elo) / 400))
 
-        result = row["result"]
+        result = float(row["result"])
 
         teams[home] = home_elo + k * (result - exp_home)
         teams[away] = away_elo + k * ((1 - result) - (1 - exp_home))
@@ -38,56 +43,15 @@ def compute_elo(df, k=20, base=1500):
     return df
 
 
-# =========================
-# PRO FEATURE ENGINE
-# =========================
-import pandas as pd
-import numpy as np
-
-
-# =========================
-# ELO SYSTEM
-# =========================
-def compute_elo(df, k=20, base=1500):
-    teams = {}
-
-    def get(team):
-        return teams.get(team, base)
-
-    home_elos = []
-    away_elos = []
-
-    for _, row in df.iterrows():
-
-        home = row["home_team"]
-        away = row["away_team"]
-
-        home_elo = get(home)
-        away_elo = get(away)
-
-        home_elos.append(home_elo)
-        away_elos.append(away_elo)
-
-        exp_home = 1 / (1 + 10 ** ((away_elo - home_elo) / 400))
-
-        result = row["result"]
-
-        teams[home] = home_elo + k * (result - exp_home)
-        teams[away] = away_elo + k * ((1 - result) - (1 - exp_home))
-
-    df["home_elo"] = home_elos
-    df["away_elo"] = away_elos
-
-    return df
-
-
-# =========================
-# PRO FEATURE ENGINE
-# =========================
+# =====================================================
+# FEATURE ENGINE (PRODUCTION GRADE)
+# =====================================================
 def build_features(df):
 
+    df = df.copy()
+
     # -------------------------
-    # BASIC PERFORMANCE
+    # BASIC SIGNALS
     # -------------------------
     df["goal_diff"] = df["home_goals"] - df["away_goals"]
 
@@ -100,59 +64,60 @@ def build_features(df):
     )
 
     # -------------------------
-    # ELO STRENGTH
+    # ELO
     # -------------------------
     df = compute_elo(df)
     df["elo_diff"] = df["home_elo"] - df["away_elo"]
 
     # -------------------------
-    # HOME ADVANTAGE
+    # FIXED ATTACK / DEFENSE (NO RANDOMNESS)
     # -------------------------
-    df["home_advantage"] = 0.30
+    df["home_attack"] = df.groupby("home_team")["home_goals"].transform(
+        lambda x: x.rolling(5, min_periods=1).mean()
+    )
 
-    # =====================================================
-    # 🧠 PRO SIGNALS (NEW LAYER)
-    # =====================================================
+    df["away_attack"] = df.groupby("away_team")["away_goals"].transform(
+        lambda x: x.rolling(5, min_periods=1).mean()
+    )
 
-    # ⚽ 1. xG PROXY (expected attacking strength)
-    df["home_xg_proxy"] = df["home_goals"] * 0.65 + np.random.normal(0, 0.2, len(df))
-    df["away_xg_proxy"] = df["away_goals"] * 0.65 + np.random.normal(0, 0.2, len(df))
+    df["attack_strength"] = df["home_attack"] - df["away_attack"]
 
-    # ⚡ 2. ATTACKING POWER
-    df["attack_strength"] = df["home_xg_proxy"] - df["away_xg_proxy"]
+    df["home_defense"] = df.groupby("home_team")["away_goals"].transform(
+        lambda x: x.rolling(5, min_periods=1).mean()
+    )
 
-    # 🛡️ 3. DEFENSIVE STABILITY
-    df["home_defense"] = df["away_goals"].rolling(5, min_periods=1).mean()
-    df["away_defense"] = df["home_goals"].rolling(5, min_periods=1).mean()
+    df["away_defense"] = df.groupby("away_team")["home_goals"].transform(
+        lambda x: x.rolling(5, min_periods=1).mean()
+    )
 
     df["defensive_diff"] = df["away_defense"] - df["home_defense"]
 
-    # 🔥 4. MOMENTUM (FORM ACCELERATION)
+    # -------------------------
+    # MOMENTUM
+    # -------------------------
     df["momentum"] = df["home_form"] - df["away_form"]
 
-    # 🧊 5. FATIGUE FACTOR (schedule stress proxy)
-    df["fatigue"] = np.random.uniform(0, 1, len(df))
-
-    # 🎲 6. VOLATILITY (inconsistency measure)
+    # -------------------------
+    # STABILITY (VOLATILITY)
+    # -------------------------
     df["volatility"] = df.groupby("home_team")["goal_diff"].transform(
         lambda x: x.rolling(5, min_periods=1).std()
-    )
-
-    # 💰 7. MARKET EDGE PLACEHOLDER
-    if "model_prob" in df.columns and "market_prob" in df.columns:
-        df["market_edge"] = df["model_prob"] - df["market_prob"]
-    else:
-        df["market_edge"] = 0
+    ).fillna(0)
 
     # -------------------------
-    # FINAL COMPOSITE SCORE
+    # HOME ADVANTAGE (FIXED CONSTANT)
+    # -------------------------
+    df["home_advantage"] = 0.25
+
+    # -------------------------
+    # FINAL QUANT SCORE
     # -------------------------
     df["power_index"] = (
-        df["elo_diff"] * 0.35 +
-        df["momentum"] * 0.25 +
-        df["attack_strength"] * 0.20 +
-        df["defensive_diff"] * 0.15 -
+        df["elo_diff"] * 0.4 +
+        df["momentum"] * 0.3 +
+        df["attack_strength"] * 0.2 +
+        df["defensive_diff"] * 0.1 -
         df["volatility"] * 0.05
     )
 
-    return df.dropna()
+    return df.fillna(0)
