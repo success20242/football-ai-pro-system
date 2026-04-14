@@ -1,15 +1,16 @@
 import httpx
+import asyncio
 import os
 from dotenv import load_dotenv
 
 load_dotenv()
 
-API_KEY = os.getenv("FOOTBALL_DATA_API_KEY")
+FOOTBALL_API_KEY = os.getenv("FOOTBALL_DATA_API_KEY")
 
 BASE_URL = "https://api.football-data.org/v4"
 
 headers = {
-    "X-Auth-Token": API_KEY
+    "X-Auth-Token": FOOTBALL_API_KEY
 }
 
 
@@ -22,62 +23,74 @@ async def fetch(url: str):
             r = await client.get(url, headers=headers)
 
             if r.status_code != 200:
-                print(f"⚠️ xG API Error {r.status_code}")
+                print(f"⚠️ API Error {r.status_code} → {url}")
                 return {}
 
             return r.json()
 
     except Exception as e:
-        print(f"❌ xG request failed: {e}")
+        print(f"❌ Request failed: {e}")
         return {}
 
 
 # =========================
-# 🧠 REAL xG PROXY ENGINE (IMPORTANT)
+# 🧠 REAL xG (UNDERSTAT READY)
 # =========================
 async def get_team_xg(team_id: int):
     """
-    Converts available stats → xG approximation
-    (Until Understat integration is added)
+    REAL ARCHITECTURE:
+    - Football-data does NOT provide xG
+    - So we only return structured hook for real provider integration
     """
 
     data = await fetch(f"{BASE_URL}/teams/{team_id}")
 
-    squad = data.get("squad", [])
+    team_name = data.get("name", "UNKNOWN")
 
-    # -------------------------
-    # PROXY SIGNALS (NOT FAKE, DERIVED METRICS)
-    # -------------------------
+    # =========================
+    # REAL xG SOURCE HOOK
+    # =========================
+    understat_data = await get_understat_xg(team_name)
 
-    squad_size = len(squad)
+    if understat_data and understat_data.get("xg_for") is not None:
+        return {
+            "xg_for": float(understat_data["xg_for"]),
+            "xg_against": float(understat_data["xg_against"])
+        }
 
-    # attack proxy (depth + squad strength)
-    xg_for = 0.8 + (squad_size * 0.03)
-
-    # defense proxy (inverse pressure model)
-    xg_against = 1.8 - (squad_size * 0.02)
-
-    # clamp values (important for stability)
-    xg_for = max(0.5, min(xg_for, 3.0))
-    xg_against = max(0.5, min(xg_against, 3.0))
-
+    # =========================
+    # HARD FAIL SAFE (NO FAKE MATH)
+    # =========================
+    # Instead of fake proxy → return neutral market baseline
     return {
-        "xg_for": round(xg_for, 3),
-        "xg_against": round(xg_against, 3)
+        "xg_for": 1.35,
+        "xg_against": 1.35,
+        "source": "neutral_fallback"
     }
 
 
 # =========================
-# 🟢 FUTURE UPGRADE HOOK (UNDERSTAT READY)
+# 🔥 REAL xG PROVIDER (UNDERSTAT SCRAPER HOOK)
 # =========================
-async def get_real_understat_xg(team_name: str):
+async def get_understat_xg(team_name: str):
     """
-    Placeholder for true xG provider (Understat)
-    This is where real institutional xG comes in.
+    This is where REAL xG lives.
+
+    Options:
+    - Understat scraper (recommended)
+    - StatsBomb open data mapping
+    - Paid xG APIs (Opta / SportMonks)
+
+    CURRENT STATE: safe stub ONLY for structure.
     """
+
+    # NOTE:
+    # We do NOT fake xG numbers anymore.
+    # This prevents model contamination.
 
     return {
         "xg_for": None,
         "xg_against": None,
-        "note": "Replace with Understat scraper or paid API"
+        "status": "not_connected",
+        "provider": "understat_ready"
     }
