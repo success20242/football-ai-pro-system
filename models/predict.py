@@ -3,9 +3,7 @@ import numpy as np
 
 model = joblib.load("models/model.pkl")
 
-# =========================
-# SAFE CLASS HANDLING
-# =========================
+# Expected: model.classes_ = [0, 1, 2]
 CLASS_MAP = list(model.classes_)
 
 
@@ -20,50 +18,49 @@ def predict(features):
     """
 
     try:
-        # -------------------------
-        # VALIDATE INPUT
-        # -------------------------
+        # =========================
+        # VALIDATION
+        # =========================
         if features is None:
             raise ValueError("Features are None")
 
-        features = np.array(features, dtype=float).reshape(1, -1)
+        features = np.asarray(features, dtype=float).reshape(1, -1)
 
-        if np.isnan(features).any():
-            raise ValueError("NaN detected in features")
+        if not np.isfinite(features).all():
+            raise ValueError("Invalid feature values (NaN or Inf detected)")
 
-        # -------------------------
-        # MODEL PREDICTION
-        # -------------------------
+        # =========================
+        # PREDICT
+        # =========================
         probs = model.predict_proba(features)[0]
 
-        # -------------------------
-        # INITIAL OUTPUT
-        # -------------------------
+        # =========================
+        # SAFE DEFAULT OUTPUT
+        # =========================
         result = {
             "home_win": 0.0,
             "draw": 0.0,
             "away_win": 0.0
         }
 
-        # -------------------------
-        # MAP CLASSES SAFELY
-        # -------------------------
+        # =========================
+        # DIRECT CLASS MAPPING (CORRECT WAY)
+        # =========================
         for i, cls in enumerate(CLASS_MAP):
-
             prob = float(probs[i])
 
-            if cls in [0, "HOME", "home", 1]:
+            if cls == 0 or str(cls).lower() in ["home"]:
                 result["home_win"] = prob
 
-            elif cls in [1, "DRAW", "draw", "X"]:
+            elif cls == 1 or str(cls).lower() in ["draw", "x"]:
                 result["draw"] = prob
 
-            elif cls in [2, "AWAY", "away", "2"]:
+            elif cls == 2 or str(cls).lower() in ["away"]:
                 result["away_win"] = prob
 
-        # -------------------------
-        # FINAL SAFETY CHECK (NORMALIZE)
-        # -------------------------
+        # =========================
+        # FINAL SAFETY CHECK
+        # =========================
         total = sum(result.values())
 
         if total > 0:
@@ -74,7 +71,7 @@ def predict(features):
     except Exception as e:
         print(f"⚠️ Prediction error: {e}")
 
-        # fallback (NEVER BREAK API)
+        # stable fallback (never breaks API)
         return {
             "home_win": 0.33,
             "draw": 0.34,
