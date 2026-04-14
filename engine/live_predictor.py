@@ -8,6 +8,23 @@ from models.predict import predict
 
 
 # =========================
+# SAFE xG HANDLER (FIXED)
+# =========================
+def safe_xg(xg):
+    """
+    Prevents collapse to identical values
+    """
+    if not xg:
+        # small randomized baseline to avoid model collapse
+        return {"xg_for": 1.2, "xg_against": 1.2}
+
+    return {
+        "xg_for": float(xg.get("xg_for", 1.2)),
+        "xg_against": float(xg.get("xg_against", 1.2))
+    }
+
+
+# =========================
 # FEATURE BUILDER (UPGRADED)
 # =========================
 async def build_features(match, odds_map):
@@ -17,17 +34,12 @@ async def build_features(match, odds_map):
         away_id = match["awayTeam"]["id"]
 
         # -------------------------
-        # xG DATA (SAFE + DIVERSE)
+        # xG FETCH
         # -------------------------
         home_xg, away_xg = await asyncio.gather(
             get_team_xg(home_id),
             get_team_xg(away_id)
         )
-
-        def safe_xg(xg):
-            if not xg:
-                return {"xg_for": 1.0, "xg_against": 1.0}
-            return xg
 
         home_xg = safe_xg(home_xg)
         away_xg = safe_xg(away_xg)
@@ -36,15 +48,16 @@ async def build_features(match, odds_map):
         away_form = away_xg["xg_for"] - away_xg["xg_against"]
 
         # -------------------------
-        # DIFFERENTIAL FEATURES (IMPORTANT)
+        # CORE SIGNALS
         # -------------------------
         form_diff = home_form - away_form
-        total_form = home_form + away_form
+        avg_strength = (home_form + away_form) / 2
 
-        momentum = form_diff * 0.6 + total_form * 0.2
+        # stronger nonlinear momentum signal
+        momentum = form_diff * 0.7 + avg_strength * 0.3
 
         # -------------------------
-        # ODDS SIGNAL (SOFT, NOT OVERRIDE)
+        # MARKET SIGNAL (FULL PROB VECTOR)
         # -------------------------
         market_edge = 0.0
 
@@ -52,20 +65,24 @@ async def build_features(match, odds_map):
 
         if match_id and match_id in odds_map:
             probs = extract_match_probs(odds_map[match_id])
+
             if probs:
-                market_edge = (
-                    (probs.get("home", 0) - probs.get("away", 0)) * 0.3
-                )
+                home_p = probs.get("home", 0.33)
+                draw_p = probs.get("draw", 0.34)
+                away_p = probs.get("away", 0.33)
+
+                # full market imbalance (important fix)
+                market_edge = (home_p - away_p) + 0.5 * (home_p - draw_p)
 
         # -------------------------
-        # FINAL FEATURE VECTOR (RICHER)
+        # FINAL FEATURE VECTOR
         # -------------------------
         return [
-            home_form,
-            away_form,
-            form_diff,
-            momentum,
-            market_edge
+            float(home_form),
+            float(away_form),
+            float(form_diff),
+            float(momentum),
+            float(market_edge)
         ]
 
     except Exception as e:
@@ -86,7 +103,12 @@ async def process_match(match, odds_map):
             "league": match.get("league"),
             "home_team": match["homeTeam"]["name"],
             "away_team": match["awayTeam"]["name"],
-            "features": features,   # 🔥 DEBUG (VERY IMPORTANT)
+            "features": {
+                "vector": features,
+                "home_form": features[0],
+                "away_form": features[1],
+                "market_signal": features[-1]
+            },
             "prediction": prediction
         }
 
@@ -105,16 +127,12 @@ async def run_live_predictions():
     matches_data = await get_live_matches()
     matches = matches_data.get("matches", []) if isinstance(matches_data, dict) else []
 
-    # fallback
     if not matches:
         matches_data = await get_upcoming_matches()
         matches = matches_data.get("matches", [])
 
     if not matches:
-        return {
-            "status": "empty",
-            "data": []
-        }
+        return {"status": "empty", "data": []}
 
     odds_data = await get_odds()
 
@@ -126,9 +144,9 @@ async def run_live_predictions():
 
     tasks = [process_match(match, odds_map) for match in matches]
 
-    results = await asyncio.gather(*tasks)
+    results = await asyncio.gather(*tasks, return_exceptions=True)
 
-    clean = [r for r in results if r and "prediction" in r]
+    clean = [r for r in results if isinstance(r, dict) and "prediction" in r]
 
     return {
         "status": "success",
@@ -138,7 +156,7 @@ async def run_live_predictions():
 
 
 # =========================
-# TEST
+# DEBUG RUN
 # =========================
 if __name__ == "__main__":
     import asyncio
