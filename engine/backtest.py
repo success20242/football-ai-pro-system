@@ -3,15 +3,33 @@ from engine.portfolio import Portfolio
 from models.predict import predict
 
 
+# =========================
+# NORMALIZE PROBS (SAFETY LAYER)
+# =========================
+def normalize_probs(probs):
+    total = probs["home_win"] + probs["draw"] + probs["away_win"]
+
+    if total == 0:
+        return probs
+
+    return {
+        "home_win": probs["home_win"] / total,
+        "draw": probs["draw"] / total,
+        "away_win": probs["away_win"] / total,
+    }
+
+
+# =========================
+# EXPECTED VALUE
+# =========================
+def expected_value(prob, odds):
+    return (prob * odds) - 1
+
+
+# =========================
+# BACKTEST ENGINE (INSTITUTIONAL)
+# =========================
 def run_backtest(df):
-    """
-    df must contain:
-    - home_form
-    - away_form
-    - market_edge
-    - result (0=home, 1=draw, 2=away)
-    - odds_home / odds_draw / odds_away (optional)
-    """
 
     portfolio = Portfolio(bankroll=1000)
 
@@ -23,36 +41,48 @@ def run_backtest(df):
             row["market_edge"]
         ]
 
-        probs = predict(features)
+        probs = normalize_probs(predict(features))
 
-        home_p = probs["home_win"]
-        draw_p = probs["draw"]
-        away_p = probs["away_win"]
-
-        # 🎯 pick best value bet (EV-based selection)
+        # =========================
+        # VALUE CALCULATION
+        # =========================
         bets = [
-            ("HOME", home_p, row.get("odds_home", 2.0)),
-            ("DRAW", draw_p, row.get("odds_draw", 3.2)),
-            ("AWAY", away_p, row.get("odds_away", 2.0)),
+            ("HOME", probs["home_win"], row.get("odds_home", 2.0)),
+            ("DRAW", probs["draw"], row.get("odds_draw", 3.2)),
+            ("AWAY", probs["away_win"], row.get("odds_away", 2.0)),
         ]
 
-        best_bet = max(bets, key=lambda x: x[1] * x[2])
+        # EV-based selection
+        scored_bets = [
+            (b, expected_value(p, o), p, o)
+            for b, p, o in bets
+        ]
 
-        bet_type, prob, odds = best_bet
+        best_bet = max(scored_bets, key=lambda x: x[1])
 
+        bet_type, ev, prob, odds = best_bet
+
+        # =========================
+        # KELLY STAKING (SAFE)
+        # =========================
         stake = portfolio.kelly_stake(prob, odds)
 
-        if stake <= 0:
+        # risk clamp (VERY IMPORTANT in real systems)
+        stake = min(stake, portfolio.bankroll * 0.05)
+
+        if stake <= 0 or ev <= 0:
             continue
 
-        # 🧠 result mapping (correct 3-way system)
+        # =========================
+        # RESULT MAPPING
+        # =========================
         result_map = {
             0: "HOME",
             1: "DRAW",
             2: "AWAY"
         }
 
-        won = (result_map[row["result"]] == bet_type)
+        won = (result_map.get(row["result"]) == bet_type)
 
         portfolio.update(stake, odds, won)
 
