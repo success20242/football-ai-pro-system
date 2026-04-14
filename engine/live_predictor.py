@@ -12,31 +12,32 @@ from models.predict import predict
 # =========================
 async def build_features(match, odds_map):
 
-    home_id = match["homeTeam"]["id"]
-    away_id = match["awayTeam"]["id"]
+    try:
+        home_id = match["homeTeam"]["id"]
+        away_id = match["awayTeam"]["id"]
 
-    # 🔥 parallel xG fetch
-    home_xg, away_xg = await asyncio.gather(
-        get_team_xg(home_id),
-        get_team_xg(away_id)
-    )
+        home_xg, away_xg = await asyncio.gather(
+            get_team_xg(home_id),
+            get_team_xg(away_id)
+        )
 
-    home_form = home_xg["xg_for"] - home_xg["xg_against"]
-    away_form = away_xg["xg_for"] - away_xg["xg_against"]
+        home_form = home_xg["xg_for"] - home_xg["xg_against"]
+        away_form = away_xg["xg_for"] - away_xg["xg_against"]
 
-    momentum = home_form - away_form
+        momentum = home_form - away_form
+        market_edge = momentum * 0.1
 
-    # default fallback
-    market_edge = momentum * 0.1
+        match_id = match.get("id")
 
-    match_id = match.get("id")
+        if match_id in odds_map:
+            probs = extract_match_probs(odds_map[match_id])
+            if probs:
+                market_edge = probs["home"] - probs["away"]
 
-    if match_id in odds_map:
-        probs = extract_match_probs(odds_map[match_id])
-        if probs:
-            market_edge = probs["home"] - probs["away"]
+        return [home_form, away_form, market_edge]
 
-    return [home_form, away_form, market_edge]
+    except Exception as e:
+        raise ValueError(f"Feature build failed: {e}")
 
 
 # =========================
@@ -47,35 +48,37 @@ async def run_live_predictions():
     matches_data = await get_live_matches()
     odds_data = await get_odds()
 
-    matches = matches_data.get("matches", [])
+    matches = matches_data.get("matches", []) if isinstance(matches_data, dict) else []
 
-    # ✅ SAFE ODDS MAP
     odds_map = {
         o.get("id"): o
         for o in odds_data
         if isinstance(o, dict) and o.get("id") is not None
     }
 
-    results = []
+    tasks = []
 
     for match in matches:
+        tasks.append(process_match(match, odds_map))
 
-        try:
-            features = await build_features(match, odds_map)
-            prediction = predict(features)
+    results = await asyncio.gather(*tasks, return_exceptions=True)
 
-            results.append({
-                "home_team": match["homeTeam"]["name"],
-                "away_team": match["awayTeam"]["name"],
-                "prediction": prediction
-            })
+    # filter errors
+    clean_results = [r for r in results if isinstance(r, dict)]
 
-        except Exception as e:
-            print(f"⚠️ Error: {e}")
-            continue
-
-    return results
+    return clean_results
 
 
-if __name__ == "__main__":
-    print(asyncio.run(run_live_predictions()))
+async def process_match(match, odds_map):
+    try:
+        features = await build_features(match, odds_map)
+        prediction = predict(features)
+
+        return {
+            "home_team": match["homeTeam"]["name"],
+            "away_team": match["awayTeam"]["name"],
+            "prediction": prediction
+        }
+
+    except Exception:
+        return None
