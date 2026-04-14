@@ -1,18 +1,14 @@
-from fastapi import FastAPI, Body
+from fastapi import FastAPI, Body, HTTPException
 from pydantic import BaseModel
 
 from models.predict import predict
 from engine.live_predictor import run_live_predictions
 from engine.backtest import run_backtest
 from features.real_features import build_real_features
-from data.football_api import get_live_matches
 
 app = FastAPI()
 
 
-# =========================
-# INPUT MODEL (RAW MATCH ONLY)
-# =========================
 class MatchInput(BaseModel):
     match: dict
 
@@ -25,14 +21,23 @@ async def predict_endpoint(data: MatchInput):
 
     match = data.match
 
-    # 🟢 USE REAL FEATURE ENGINE
-    features = await build_real_features(match)
+    # ✅ VALIDATION (CRITICAL FIX)
+    if "homeTeam" not in match or "awayTeam" not in match:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid match format. Must include homeTeam and awayTeam"
+        )
 
-    return predict(features)
+    try:
+        features = await build_real_features(match)
+        return predict(features)
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # =========================
-# LIVE PREDICTIONS (REAL PIPELINE)
+# LIVE
 # =========================
 @app.get("/live")
 async def live_predictions():
@@ -40,19 +45,16 @@ async def live_predictions():
 
 
 # =========================
-# BACKTEST (REAL FORMAT)
+# BACKTEST
 # =========================
 @app.post("/backtest")
 async def backtest_endpoint(dataset: list = Body(...)):
 
-    """
-    Expected:
-    [
-        {
-            "match": {...},
-            "label": 0/1/2
-        }
-    ]
-    """
+    import pandas as pd
 
-    return run_backtest(dataset)
+    try:
+        df = pd.DataFrame(dataset)
+        return run_backtest(df)
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
