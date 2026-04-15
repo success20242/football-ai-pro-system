@@ -1,7 +1,60 @@
 import asyncio
+import logging
 
 from data.ingestion import fetch_matches, LEAGUES
 from core.queue import enqueue_prediction
+from core.rate_limiter import acquire_slot
+
+
+# =========================
+# LOGGING
+# =========================
+logger = logging.getLogger("multi-league-runner")
+logging.basicConfig(level=logging.INFO)
+
+
+# =========================
+# CONFIG
+# =========================
+MAX_CONCURRENT_LEAGUES = 3   # prevents API overload
+QUEUE_DELAY = 0.05          # smooth queue flow
+
+
+# =========================
+# PROCESS SINGLE LEAGUE
+# =========================
+async def process_league(league: str):
+
+    count = 0
+
+    try:
+        # 🔒 Rate limit per league fetch
+        allowed = await acquire_slot()
+        if not allowed:
+            await asyncio.sleep(0.5)
+
+        data = await fetch_matches(league)
+
+        if not isinstance(data, list):
+            logger.warning(f"{league}: invalid data")
+            return 0
+
+        for match in data:
+            if not isinstance(match, dict):
+                continue
+
+            await enqueue_prediction(match)
+            count += 1
+
+            # 🔥 smooth queue (prevents Redis spike)
+            await asyncio.sleep(QUEUE_DELAY)
+
+        logger.info(f"{league}: queued {count} matches")
+
+    except Exception as e:
+        logger.error(f"{league} error: {e}")
+
+    return count
 
 
 # =========================
@@ -9,31 +62,22 @@ from core.queue import enqueue_prediction
 # =========================
 async def run_all():
 
-    all_count = 0
+    semaphore = asyncio.Semaphore(MAX_CONCURRENT_LEAGUES)
 
-    for league in LEAGUES:
+    async def safe_process(league):
+        async with semaphore:
+            return await process_league(league)
 
-        try:
-            # ⚠️ keep API call isolated per league
-            data = await fetch_matches(league)
+    tasks = [safe_process(league) for league in LEAGUES]
 
-            if not isinstance(data, list):
-                continue
+    results = await asyncio.gather(*tasks, return_exceptions=True)
 
-            for match in data:
-                if isinstance(match, dict):
-                    await enqueue_prediction(match)
-                    all_count += 1
-
-            # 🔥 small delay = prevents API hammering
-            await asyncio.sleep(0.5)
-
-        except Exception as e:
-            print(f"League error ({league}):", e)
+    total = sum(r for r in results if isinstance(r, int))
 
     return {
         "status": "queued",
-        "total_matches": all_count
+        "total_matches": total,
+        "leagues": len(LEAGUES)
     }
 
 
@@ -41,5 +85,4 @@ async def run_all():
 # DEBUG RUN
 # =========================
 if __name__ == "__main__":
-    import asyncio
     print(asyncio.run(run_all()))
