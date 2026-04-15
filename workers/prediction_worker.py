@@ -1,43 +1,111 @@
 import asyncio
+import logging
 
-from core.queue import dequeue_prediction
-from core.rate_limiter import acquire_slot
-from data.football_api import get_team_stats
+from core.queue import (
+    dequeue_prediction,
+    retry_prediction,
+    mark_processing,
+    unmark_processing
+)
+from core.rate_limiter import team_stats_limit, odds_api_limit
+from data.odds_api import get_odds
 from features.real_features import build_real_features
 from models.predict import predict
 
 
-async def process(match):
-    features = await build_real_features(match, {})
+# =========================
+# LOGGING
+# =========================
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("prediction-worker")
+
+
+# =========================
+# PROCESS FUNCTION
+# =========================
+async def process(payload):
+    """
+    payload = {
+        "data": match,
+        "retries": int
+    }
+    """
+
+    match = payload.get("data")
+
+    if not isinstance(match, dict):
+        raise ValueError("Invalid match format")
+
+    match_id = match.get("id")
+
+    # -------------------------
+    # RATE LIMIT (CRITICAL)
+    # -------------------------
+    await team_stats_limit()
+    await odds_api_limit()
+
+    # -------------------------
+    # FETCH ODDS (OPTIONAL)
+    # -------------------------
+    odds_list = await get_odds()
+
+    odds_map = {
+        o.get("match_id"): o
+        for o in odds_list
+        if isinstance(o, dict)
+    }
+
+    # -------------------------
+    # BUILD FEATURES
+    # -------------------------
+    features = await build_real_features(match, odds_map)
+
+    # 🔥 IMPORTANT: enforce model shape (3 or 4 depending on your model)
+    features = features[:3] if isinstance(features, list) else [0.0, 0.0, 0.0]
+
+    # -------------------------
+    # PREDICT
+    # -------------------------
     prediction = predict(features)
 
+    logger.info(f"✅ Prediction done: {match_id}")
+
     return {
-        "match_id": match.get("id"),
+        "match_id": match_id,
+        "features": features,
         "prediction": prediction
     }
 
 
+# =========================
+# WORKER LOOP
+# =========================
 async def worker():
-    print("🚀 Prediction worker running...")
+    logger.info("🚀 Prediction worker running...")
 
     while True:
-        job = await dequeue_prediction()
+        payload = await dequeue_prediction()
 
-        if not job:
-            await asyncio.sleep(0.2)
+        if not payload:
+            await asyncio.sleep(0.5)
             continue
 
-        allowed = await acquire_slot()
-
-        if not allowed:
-            # requeue job if rate limited
-            from core.queue import enqueue_prediction
-            await enqueue_prediction(job)
-            await asyncio.sleep(0.3)
-            continue
+        match = payload.get("data")
+        match_id = match.get("id") if isinstance(match, dict) else None
 
         try:
-            await process(job)
+            if match_id:
+                await mark_processing(match_id)
+
+            await process(payload)
 
         except Exception as e:
-            print("Worker error:", e)
+            logger.warning(f"⚠️ Worker error (retrying): {e}")
+            await retry_prediction(payload)
+
+        finally:
+            if match_id:
+                await unmark_processing(match_id)
+
+            # small delay to avoid burst
+            await asyncio.sleep(0.1)
