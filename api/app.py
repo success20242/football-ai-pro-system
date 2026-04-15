@@ -1,14 +1,13 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 from datetime import datetime
 import logging
 
 from models.predict import predict
 from engine.live_predictor import run_live_predictions
 from engine.backtest import run_backtest
-from features.real_features import build_real_features
-
+from core.queue import enqueue_prediction
 
 # =========================
 # LOGGING
@@ -16,7 +15,7 @@ from features.real_features import build_real_features
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("football-api")
 
-app = FastAPI(title="Football Prediction API", version="2.2")
+app = FastAPI(title="Football Prediction API", version="3.0")
 
 
 # =========================
@@ -46,55 +45,35 @@ def root():
     return {
         "status": "ok",
         "message": "Football Prediction API running 🚀",
-        "endpoints": ["/predict", "/live", "/backtest"]
+        "version": "3.0",
+        "endpoints": ["/predict", "/live", "/backtest", "/health"]
     }
-
-
-# =========================
-# FEATURE NORMALIZER (QUANT STABLE)
-# =========================
-def normalize_features(features):
-    """
-    HARD CONTRACT:
-    model ALWAYS receives 5 features:
-    [strength, injury, market, xg_proxy, momentum]
-    """
-
-    if not isinstance(features, list):
-        return [0.0] * 5
-
-    cleaned = []
-    for f in features:
-        try:
-            cleaned.append(float(f))
-        except Exception:
-            cleaned.append(0.0)
-
-    # enforce EXACT shape
-    cleaned = cleaned[:5]
-
-    while len(cleaned) < 5:
-        cleaned.append(0.0)
-
-    return cleaned
 
 
 # =========================
 # SAFE MATCH CONVERTER
 # =========================
-def safe_match_dict(match_obj):
-    """
-    Fixes: string indices bug + pydantic mismatch safety
-    """
-    if isinstance(match_obj, dict):
-        return match_obj
-    if hasattr(match_obj, "dict"):
-        return match_obj.dict()
-    raise ValueError("Invalid match input format")
+def safe_match_dict(obj):
+    if isinstance(obj, dict):
+        return obj
+    if hasattr(obj, "dict"):
+        return obj.dict()
+    return {}
 
 
 # =========================
-# PREDICT ENDPOINT
+# HEALTH CHECK
+# =========================
+@app.get("/health")
+def health():
+    return {
+        "status": "healthy",
+        "service": "football-api"
+    }
+
+
+# =========================
+# PREDICT ENDPOINT (SYNC MODEL ONLY)
 # =========================
 @app.post("/predict")
 async def predict_endpoint(data: MatchInput):
@@ -104,18 +83,12 @@ async def predict_endpoint(data: MatchInput):
 
         logger.info(f"Predict request: {match_dict}")
 
-        # 🔥 SINGLE SOURCE OF TRUTH (NO DUPLICATE ENGINE LOGIC)
-        features = await build_real_features(match_dict)
-
-        features = normalize_features(features)
-
-        prediction = predict(features)
+        # 🔥 PUSH INTO QUEUE (NEW ARCHITECTURE)
+        await enqueue_prediction(match_dict)
 
         return {
-            "status": "success",
-            "input": match_dict,
-            "features": features,
-            "prediction": prediction
+            "status": "queued",
+            "message": "Match sent to prediction worker"
         }
 
     except Exception as e:
@@ -124,20 +97,18 @@ async def predict_endpoint(data: MatchInput):
 
 
 # =========================
-# LIVE ENDPOINT
+# LIVE ENDPOINT (PRODUCER ONLY)
 # =========================
 @app.get("/live")
 async def live_predictions():
 
     try:
-        results = await run_live_predictions()
-
-        data = results.get("data", []) if isinstance(results, dict) else []
+        result = await run_live_predictions()
 
         return {
             "status": "success",
-            "total": len(data),
-            "data": data
+            "total": result.get("total", 0),
+            "data": result.get("data", [])
         }
 
     except Exception as e:
