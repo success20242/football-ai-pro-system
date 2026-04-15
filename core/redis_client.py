@@ -13,9 +13,8 @@ REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
 REDIS_DB = int(os.getenv("REDIS_DB", 0))
 REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", None)
 
-
 # =========================
-# CONNECTION POOL (IMPORTANT)
+# CONNECTION POOL (OPTIMIZED)
 # =========================
 _pool = None
 
@@ -33,20 +32,19 @@ def get_redis_pool():
             socket_timeout=5,
             socket_connect_timeout=5,
             retry_on_timeout=True,
-            max_connections=20,  # 🔥 prevents overload
+            max_connections=20,
         )
 
     return _pool
 
 
 # =========================
-# CLIENT FACTORY
+# CLIENT SINGLETON
 # =========================
 def get_redis():
     return redis.Redis(connection_pool=get_redis_pool())
 
 
-# singleton (safe reuse)
 redis_client = get_redis()
 
 
@@ -62,12 +60,9 @@ async def check_redis():
 
 
 # =========================
-# SAFE EXECUTOR (AUTO RETRY)
+# SAFE EXECUTOR (RETRY WRAPPER)
 # =========================
 async def safe_redis_call(func, *args, retries=3, delay=0.2):
-    """
-    Wrap Redis calls with retry logic
-    """
     for attempt in range(retries):
         try:
             return await func(*args)
@@ -81,7 +76,7 @@ async def safe_redis_call(func, *args, retries=3, delay=0.2):
 
 
 # =========================
-# GRACEFUL SHUTDOWN
+# SHUTDOWN HANDLER
 # =========================
 async def close_redis():
     global _pool
