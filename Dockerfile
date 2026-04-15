@@ -11,6 +11,11 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # =========================
+# UPGRADE PIP (IMPORTANT)
+# =========================
+RUN pip install --upgrade pip
+
+# =========================
 # PYTHON DEPENDENCIES (CACHE OPTIMIZED)
 # =========================
 COPY requirements.txt .
