@@ -71,23 +71,46 @@ async def safe_enqueue(match: dict):
 async def run_live_predictions():
 
     try:
-        # -------------------------
-        # FETCH LIVE MATCHES
-        # -------------------------
-        matches_data = await get_live_matches()
-        matches = matches_data.get("matches", []) if isinstance(matches_data, dict) else []
+        matches = []
 
-        # fallback to upcoming
+        # =========================
+        # 1. TRY LIVE MATCHES (API-FOOTBALL FIRST)
+        # =========================
+        try:
+            matches_data = await get_live_matches()
+
+            # handle API-Football 403 or bad response safely
+            if isinstance(matches_data, dict):
+                matches = matches_data.get("matches", []) or []
+        except Exception as e:
+            logger.warning(f"API-Football live fetch failed: {e}")
+            matches = []
+
+        # =========================
+        # 2. FALLBACK (football-data.org)
+        # =========================
         if not matches:
-            matches_data = await get_upcoming_matches()
-            matches = matches_data.get("matches", [])
+            try:
+                matches_data = await get_upcoming_matches()
+                if isinstance(matches_data, dict):
+                    matches = matches_data.get("matches", []) or []
+            except Exception as e:
+                logger.error(f"Fallback fetch failed: {e}")
+                matches = []
 
+        # =========================
+        # 3. HARD SAFETY CHECK
+        # =========================
         if not matches:
-            return {"status": "empty", "data": []}
+            return {
+                "status": "empty",
+                "data": [],
+                "message": "No live matches available from any provider"
+            }
 
-        # -------------------------
-        # PROCESS IN PARALLEL (SAFE)
-        # -------------------------
+        # =========================
+        # 4. PROCESS MATCHES
+        # =========================
         tasks = [safe_enqueue(match) for match in matches]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
