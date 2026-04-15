@@ -16,8 +16,8 @@ logging.basicConfig(level=logging.INFO)
 # =========================
 # CONFIG
 # =========================
-MAX_CONCURRENT_LEAGUES = 3   # prevents API overload
-QUEUE_DELAY = 0.05          # smooth queue flow
+MAX_CONCURRENT_LEAGUES = 3
+QUEUE_DELAY = 0.05
 
 
 # =========================
@@ -25,10 +25,12 @@ QUEUE_DELAY = 0.05          # smooth queue flow
 # =========================
 async def process_league(league: str):
 
+    if not league:
+        return 0
+
     count = 0
 
     try:
-        # 🔒 Rate limit per league fetch
         allowed = await acquire_slot()
         if not allowed:
             await asyncio.sleep(0.5)
@@ -36,23 +38,26 @@ async def process_league(league: str):
         data = await fetch_matches(league)
 
         if not isinstance(data, list):
-            logger.warning(f"{league}: invalid data")
+            logger.warning(f"{league}: invalid data type {type(data)}")
             return 0
 
         for match in data:
             if not isinstance(match, dict):
                 continue
 
+            # 🔒 ensure ID exists (prevents worker crashes later)
+            if not match.get("id"):
+                continue
+
             await enqueue_prediction(match)
             count += 1
 
-            # 🔥 smooth queue (prevents Redis spike)
             await asyncio.sleep(QUEUE_DELAY)
 
-        logger.info(f"{league}: queued {count} matches")
+        logger.info(f"📊 {league}: queued {count} matches")
 
     except Exception as e:
-        logger.error(f"{league} error: {e}")
+        logger.error(f"❌ {league} error: {e}")
 
     return count
 
@@ -62,17 +67,24 @@ async def process_league(league: str):
 # =========================
 async def run_all():
 
+    if not LEAGUES:
+        logger.error("No leagues configured")
+        return {"status": "error", "message": "No leagues"}
+
     semaphore = asyncio.Semaphore(MAX_CONCURRENT_LEAGUES)
 
     async def safe_process(league):
         async with semaphore:
             return await process_league(league)
 
-    tasks = [safe_process(league) for league in LEAGUES]
+    tasks = [safe_process(l) for l in LEAGUES]
 
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
-    total = sum(r for r in results if isinstance(r, int))
+    total = 0
+    for r in results:
+        if isinstance(r, int):
+            total += r
 
     return {
         "status": "queued",
@@ -82,7 +94,7 @@ async def run_all():
 
 
 # =========================
-# DEBUG RUN
+# DEBUG
 # =========================
 if __name__ == "__main__":
     print(asyncio.run(run_all()))
