@@ -1,11 +1,14 @@
 fastapi
-uvicorn
-pandas
+uvicorn[standard]
+
 numpy
+pandas
 scikit-learn
 xgboost
+
+joblib
 requests
 python-dotenv
-joblib
+
 psycopg2-binary
 redis
