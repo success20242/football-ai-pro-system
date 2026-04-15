@@ -10,87 +10,131 @@ BASE_URL = "https://api.the-odds-api.com/v4/sports/soccer_epl/odds"
 
 
 # =========================
-# FETCH (SAFE JSON HANDLING)
+# SAFE FETCH (WITH DEBUG)
 # =========================
 async def fetch(params: dict):
     try:
         async with httpx.AsyncClient(timeout=15) as client:
             r = await client.get(BASE_URL, params=params)
 
+            if r.status_code == 429:
+                print("⚠️ ODDS API RATE LIMIT HIT")
+                return []
+
             if r.status_code != 200:
+                print(f"❌ ODDS API ERROR {r.status_code}")
                 return []
 
             data = r.json()
 
-            # FIX: ensure list output only if valid
             if isinstance(data, list):
                 return data
 
             return data.get("data", []) if isinstance(data, dict) else []
 
-    except Exception:
+    except Exception as e:
+        print(f"❌ ODDS FETCH ERROR → {e}")
         return []
 
 
 # =========================
-# NORMALIZE GAME (FIXED MARKET PARSING)
+# IMPLIED PROBABILITY
+# =========================
+def implied_prob(odds: float):
+    try:
+        return round(1 / float(odds), 4) if odds else 0.0
+    except:
+        return 0.0
+
+
+# =========================
+# NORMALIZE GAME (PRO VERSION)
 # =========================
 def normalize_game(game: dict):
     try:
         if not isinstance(game, dict):
             return None
 
+        game_id = game.get("id")
+        home_team = game.get("home_team")
+        away_team = game.get("away_team")
+
         bookmakers = game.get("bookmakers", [])
-        if not bookmakers or not isinstance(bookmakers, list):
+        if not bookmakers:
             return None
 
-        markets = bookmakers[0].get("markets", [])
-        if not markets:
+        # ✅ pick first bookmaker with valid markets
+        market = None
+        for bm in bookmakers:
+            markets = bm.get("markets", [])
+            if markets:
+                market = markets[0]
+                break
+
+        if not market:
             return None
 
-        outcomes = markets[0].get("outcomes", [])
+        outcomes = market.get("outcomes", [])
         if not outcomes:
             return None
 
         odds = {"home": None, "away": None, "draw": None}
 
+        # ✅ CORRECT TEAM MATCHING
         for o in outcomes:
-            if not isinstance(o, dict):
-                continue
-
             name = (o.get("name") or "").lower()
-            price = o.get("price") or 2.0
+            price = float(o.get("price") or 2.0)
 
-            # FIXED CLASSIFICATION LOGIC
             if "draw" in name:
-                odds["draw"] = float(price)
+                odds["draw"] = price
 
-            elif odds["home"] is None:
-                odds["home"] = float(price)
+            elif home_team and name == home_team.lower():
+                odds["home"] = price
 
-            else:
-                odds["away"] = float(price)
+            elif away_team and name == away_team.lower():
+                odds["away"] = price
+
+        # ⚠️ fallback if names don't match exactly
+        for o in outcomes:
+            price = float(o.get("price") or 2.0)
+
+            if odds["home"] is None:
+                odds["home"] = price
+            elif odds["away"] is None:
+                odds["away"] = price
 
         if odds["home"] is None or odds["away"] is None:
             return None
 
-        return {
-            "match_id": game.get("id"),
-            "home": odds["home"],
-            "away": odds["away"],
-            "draw": odds["draw"] if odds["draw"] is not None else 3.2
+        draw = odds["draw"] if odds["draw"] else 3.2
+
+        # ✅ probabilities (VERY IMPORTANT)
+        probs = {
+            "home_prob": implied_prob(odds["home"]),
+            "draw_prob": implied_prob(draw),
+            "away_prob": implied_prob(odds["away"])
         }
 
-    except Exception:
+        return {
+            "id": game_id,  # ✅ unified key
+            "home": odds["home"],
+            "draw": draw,
+            "away": odds["away"],
+            "probs": probs
+        }
+
+    except Exception as e:
+        print(f"❌ NORMALIZE ERROR → {e}")
         return None
 
 
 # =========================
-# MAIN ODDS PIPELINE
+# MAIN PIPELINE
 # =========================
 async def get_odds():
 
     if not API_KEY:
+        print("⚠️ NO ODDS API KEY")
         return []
 
     params = {
@@ -111,5 +155,7 @@ async def get_odds():
         parsed = normalize_game(g)
         if parsed:
             normalized.append(parsed)
+
+    print(f"✅ ODDS LOADED: {len(normalized)} matches")
 
     return normalized
