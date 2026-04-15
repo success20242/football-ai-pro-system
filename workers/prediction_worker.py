@@ -12,6 +12,9 @@ from data.odds_api import get_odds
 from features.real_features import build_real_features
 from models.predict import predict
 
+# ✅ BETTING EDGE IMPORT (ADDED FIX)
+from core.betting_edge import calculate_ev, get_bet_signal
+
 
 # =========================
 # LOGGING
@@ -52,6 +55,8 @@ async def process(payload):
         if isinstance(o, dict)
     }
 
+    odds = odds_map.get(match_id, {}) or {}
+
     # -------------------------
     # FEATURES
     # -------------------------
@@ -67,12 +72,36 @@ async def process(payload):
     # -------------------------
     prediction = predict(features)
 
-    logger.info(f"✅ Prediction done: {match_id}")
+    # =========================
+    # EXTRACT PROBABILITY
+    # =========================
+    if isinstance(prediction, dict):
+        prob = prediction.get("probability", 0.5)
+    else:
+        prob = float(prediction)
+
+    # -------------------------
+    # ODDS HANDLING
+    # -------------------------
+    home_odds = odds.get("home_odds", 2.0)
+
+    # =========================
+    # BETTING EDGE (NEW CORE FIX)
+    # =========================
+    ev = calculate_ev(prob, home_odds)
+    signal = get_bet_signal(ev)
+
+    logger.info(f"📊 EV={ev:.3f} | SIGNAL={signal} | match={match_id}")
 
     return {
         "match_id": match_id,
-        "prediction": prediction,
-        "features": features
+        "features": features,
+        "prediction": {
+            "probability": prob,
+            "raw": prediction,
+            "ev": ev,
+            "signal": signal
+        }
     }
 
 
@@ -115,7 +144,7 @@ async def worker():
 
 
 # =========================
-# BOOTSTRAP FIX (CRITICAL)
+# BOOTSTRAP FIX
 # =========================
 async def main():
     logger.info("🚀 Starting prediction worker...")
