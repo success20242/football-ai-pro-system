@@ -82,6 +82,9 @@ def extract_odds(match, odds_map):
 # =========================
 # FINAL FEATURE ENGINE (ROBUST)
 # =========================
+# =========================
+# FINAL FEATURE ENGINE (ENHANCED + UNIQUE)
+# =========================
 async def build_real_features(match, odds_map=None):
 
     try:
@@ -106,11 +109,10 @@ async def build_real_features(match, odds_map=None):
             except Exception:
                 home_data, away_data = {}, {}
         else:
-            # fallback if IDs missing (manual input case)
             home_data, away_data = {}, {}
 
         # -------------------------
-        # STRENGTH FEATURE
+        # TEAM STRENGTH
         # -------------------------
         home_strength = team_strength(home_data)
         away_strength = team_strength(away_data)
@@ -118,22 +120,39 @@ async def build_real_features(match, odds_map=None):
         strength_diff = home_strength - away_strength
 
         # -------------------------
-        # MARKET FEATURES
+        # ODDS EXTRACTION
         # -------------------------
         home_odds, draw_odds, away_odds = extract_odds(match, odds_map)
 
+        # 🔥 CRITICAL FIX: implied probabilities
+        try:
+            home_prob = 1 / home_odds if home_odds else 0.33
+            draw_prob = 1 / draw_odds if draw_odds else 0.33
+            away_prob = 1 / away_odds if away_odds else 0.33
+
+            total = home_prob + draw_prob + away_prob
+
+            home_prob /= total
+            draw_prob /= total
+            away_prob /= total
+
+        except Exception:
+            home_prob, draw_prob, away_prob = 0.33, 0.34, 0.33
+
+        # -------------------------
+        # MARKET FEATURES (OPTIONAL BOOST)
+        # -------------------------
         mv = market_vector(home_odds, draw_odds, away_odds)
 
         market_strength = float(mv.get("strength_diff", 0.0))
-        xg_diff = float(mv.get("xg_diff", 0.0))
 
-        # =========================
-        # FINAL VECTOR (STRICT = 3)
-        # =========================
+        # -------------------------
+        # 🔥 FINAL VECTOR (MODEL = 3 FEATURES)
+        # -------------------------
         return [
-            round(float(strength_diff), 4),
-            round(float(market_strength), 4),
-            round(float(xg_diff), 4)
+            round(float(home_prob - away_prob), 4),   # core signal
+            round(float(strength_diff), 4),           # team strength
+            round(float(market_strength), 4)          # market edge
         ]
 
     except Exception as e:
