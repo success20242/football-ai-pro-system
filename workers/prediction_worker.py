@@ -44,4 +44,83 @@ async def process(payload):
     # -------------------------
     # ODDS
     # -------------------------
-    odds_list = await get_odds()
+    odds_list = await get_odds() or []
+
+    odds_map = {
+        o.get("match_id"): o
+        for o in odds_list
+        if isinstance(o, dict)
+    }
+
+    # -------------------------
+    # FEATURES
+    # -------------------------
+    features = await build_real_features(match, odds_map)
+
+    if not isinstance(features, list):
+        features = [0.0, 0.0, 0.0]
+
+    features = features[:3]
+
+    # -------------------------
+    # PREDICTION
+    # -------------------------
+    prediction = predict(features)
+
+    logger.info(f"✅ Prediction done: {match_id}")
+
+    return {
+        "match_id": match_id,
+        "prediction": prediction,
+        "features": features
+    }
+
+
+# =========================
+# WORKER LOOP
+# =========================
+async def worker():
+    logger.info("🚀 Prediction worker running...")
+
+    while True:
+        try:
+            payload = await dequeue_prediction()
+
+            if not payload:
+                await asyncio.sleep(0.5)
+                continue
+
+            match = payload.get("data")
+            match_id = match.get("id") if isinstance(match, dict) else None
+
+            if match_id:
+                await mark_processing(match_id)
+
+            try:
+                await process(payload)
+
+            except Exception as e:
+                logger.warning(f"⚠️ Worker error (retrying): {e}")
+                await retry_prediction(payload)
+
+            finally:
+                if match_id:
+                    await unmark_processing(match_id)
+
+            await asyncio.sleep(0.1)
+
+        except Exception as loop_error:
+            logger.error(f"💥 Worker loop crash recovered: {loop_error}")
+            await asyncio.sleep(1)
+
+
+# =========================
+# BOOTSTRAP FIX (CRITICAL)
+# =========================
+async def main():
+    logger.info("🚀 Starting prediction worker...")
+    await worker()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
