@@ -15,21 +15,17 @@ API_KEY = os.getenv("ODDS_API_KEY")
 
 BASE_URL = "https://api.the-odds-api.com/v4/sports/soccer_epl/odds"
 
-# =========================
-# SHARED CLIENT
-# =========================
 client = httpx.AsyncClient(timeout=10)
 
 
 # =========================
-# SAFE FETCH (RETRY + RATE LIMIT)
+# SAFE FETCH
 # =========================
 async def fetch(params: dict, retries=2):
 
     for attempt in range(retries + 1):
         try:
-            allowed = await acquire_slot()
-            if not allowed:
+            if not await acquire_slot():
                 await asyncio.sleep(0.3)
 
             r = await client.get(BASE_URL, params=params)
@@ -39,22 +35,22 @@ async def fetch(params: dict, retries=2):
                 return data if isinstance(data, list) else []
 
             if r.status_code == 429:
-                logger.warning(f"⚠️ ODDS 429 → retry {attempt+1}")
+                logger.warning(f"⚠️ ODDS 429 retry {attempt+1}")
                 await asyncio.sleep(1.5 * (attempt + 1))
                 continue
 
-            logger.warning(f"❌ ODDS API ERROR {r.status_code}")
+            logger.warning(f"❌ ODDS ERROR {r.status_code}")
             return []
 
         except Exception as e:
-            logger.error(f"❌ ODDS FETCH ERROR → {e}")
+            logger.error(f"❌ FETCH ERROR → {e}")
             await asyncio.sleep(0.5)
 
     return []
 
 
 # =========================
-# TEAM NAME NORMALIZER 🔥
+# TEAM NORMALIZER (SYNC WITH FEATURES)
 # =========================
 def normalize_team(name: str):
     if not name:
@@ -72,7 +68,7 @@ def normalize_team(name: str):
     for k, v in replacements.items():
         name = name.replace(k, v)
 
-    return " ".join(name.split())  # clean spaces
+    return " ".join(name.split())
 
 
 # =========================
@@ -86,14 +82,11 @@ def implied_prob(odds: float):
 
 
 # =========================
-# NORMALIZE GAME (IMPROVED)
+# NORMALIZE GAME (KEY FIXED)
 # =========================
 def normalize_game(game: dict):
 
     try:
-        if not isinstance(game, dict):
-            return None
-
         raw_home = game.get("home_team")
         raw_away = game.get("away_team")
 
@@ -107,10 +100,8 @@ def normalize_game(game: dict):
         if not bookmakers:
             return None
 
-        # -------------------------
-        # FIND VALID MARKET
-        # -------------------------
         outcomes = None
+
         for bm in bookmakers:
             for market in bm.get("markets", []):
                 if market.get("key") == "h2h":
@@ -139,15 +130,15 @@ def normalize_game(game: dict):
                 odds["away"] = price
 
         # -------------------------
-        # FALLBACK (ORDER BASED)
+        # FALLBACK
         # -------------------------
-        for o in outcomes:
-            price = float(o.get("price") or 2.0)
+        fallback_prices = [float(o.get("price") or 2.0) for o in outcomes]
 
-            if odds["home"] is None:
-                odds["home"] = price
-            elif odds["away"] is None:
-                odds["away"] = price
+        if odds["home"] is None and len(fallback_prices) > 0:
+            odds["home"] = fallback_prices[0]
+
+        if odds["away"] is None and len(fallback_prices) > 1:
+            odds["away"] = fallback_prices[1]
 
         if odds["home"] is None or odds["away"] is None:
             return None
@@ -155,7 +146,7 @@ def normalize_game(game: dict):
         draw = odds["draw"] if odds["draw"] else 3.2
 
         # -------------------------
-        # IMPLIED PROBABILITIES
+        # IMPLIED PROBS
         # -------------------------
         home_p = implied_prob(odds["home"])
         draw_p = implied_prob(draw)
@@ -167,14 +158,13 @@ def normalize_game(game: dict):
             draw_p /= total
             away_p /= total
 
-        # 🔥 KEY FIX (MATCHING ENGINE)
+        # =========================
+        # 🔥 CRITICAL FIX: MATCH KEY
+        # =========================
         match_key = f"{home_team}_{away_team}"
 
         return {
             "match_key": match_key,
-
-            "home_team": home_team,
-            "away_team": away_team,
 
             "home": float(odds["home"]),
             "draw": float(draw),
@@ -193,7 +183,7 @@ def normalize_game(game: dict):
 
 
 # =========================
-# MAIN PIPELINE
+# MAIN
 # =========================
 async def get_odds():
 
@@ -209,9 +199,6 @@ async def get_odds():
     }
 
     raw = await fetch(params)
-
-    if not isinstance(raw, list):
-        return []
 
     normalized = []
 
