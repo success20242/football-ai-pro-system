@@ -14,38 +14,46 @@ def get_team_id(team):
     """
     if isinstance(team, dict):
         return team.get("id")
-
     return None
 
 
 # =========================
-# SAFE TEAM STRENGTH (IMPROVED)
+# SAFE TEAM STRENGTH (ROBUST)
 # =========================
 def team_strength(team_data: dict):
     if not isinstance(team_data, dict):
         return 0.5
 
-    # RapidAPI structure fallback
+    # RapidAPI structure fix
     if "team" in team_data:
         team_data = team_data.get("team", {})
 
     squad = team_data.get("squad", [])
     squad_size = len(squad) if isinstance(squad, list) else 0
 
-    # stable scaling
-    strength = squad_size / 25 if squad_size else 0.5
+    # fallback if no squad info
+    if squad_size == 0:
+        return 0.5
+
+    strength = squad_size / 25
 
     return min(1.5, max(0.2, strength))
 
 
 # =========================
-# SAFE ODDS FETCH
+# SAFE ODDS EXTRACTOR (FIXED KEY ALIGNMENT)
 # =========================
 def extract_odds(match, odds_map):
+    """
+    Ensures alignment with odds_api (id key)
+    """
+
     if not isinstance(odds_map, dict):
         return 2.0, 3.2, 2.0
 
-    odds = odds_map.get(match.get("id"), {})
+    match_id = match.get("id")
+
+    odds = odds_map.get(match_id, {}) if match_id else {}
 
     return (
         float(odds.get("home", 2.0)),
@@ -55,28 +63,34 @@ def extract_odds(match, odds_map):
 
 
 # =========================
-# FINAL FEATURE ENGINE (LOCKED TO 3)
+# FINAL FEATURE ENGINE (LOCKED TO 3 FEATURES)
 # =========================
 async def build_real_features(match, odds_map=None):
 
     try:
+        if not isinstance(match, dict):
+            return [0.0, 0.0, 0.0]
+
         home_team = match.get("homeTeam")
         away_team = match.get("awayTeam")
 
         home_id = get_team_id(home_team)
         away_id = get_team_id(away_team)
 
-        # 🚨 If no IDs (like /predict input), fallback to neutral features
+        # 🚨 CRITICAL: fallback for manual /predict inputs
         if home_id is None or away_id is None:
             return [0.0, 0.0, 0.0]
 
         # -------------------------
-        # TEAM DATA FETCH (SAFE)
+        # TEAM DATA FETCH (SAFE PARALLEL)
         # -------------------------
-        home_data, away_data = await asyncio.gather(
-            get_team_stats(home_id),
-            get_team_stats(away_id)
-        )
+        try:
+            home_data, away_data = await asyncio.gather(
+                get_team_stats(home_id),
+                get_team_stats(away_id)
+            )
+        except Exception:
+            return [0.0, 0.0, 0.0]
 
         # -------------------------
         # STRENGTH FEATURE
@@ -97,12 +111,12 @@ async def build_real_features(match, odds_map=None):
         xg_diff = float(mv.get("xg_diff", 0.0))
 
         # =========================
-        # FINAL LOCKED VECTOR (3 ONLY)
+        # FINAL VECTOR (STRICT = 3)
         # =========================
         return [
             float(strength_diff),
-            market_strength,
-            xg_diff
+            float(market_strength),
+            float(xg_diff)
         ]
 
     except Exception as e:
