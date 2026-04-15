@@ -2,6 +2,10 @@ import asyncio
 import logging
 
 from data.football_api import get_live_matches, get_upcoming_matches
+from data.odds_api import get_odds
+from features.real_features import build_real_features
+from models.predict import predict
+
 from core.queue import enqueue_prediction
 from core.redis_client import redis_client
 from core.rate_limiter import acquire_slot
@@ -19,11 +23,29 @@ logging.basicConfig(level=logging.INFO)
 # =========================
 QUEUE_DELAY = 0.02
 DEDUP_KEY_PREFIX = "match:queued:"
-DEDUP_TTL = 60  # seconds (avoid duplicate enqueue)
+DEDUP_TTL = 60
 
 
 # =========================
-# DEDUP CHECK (IMPORTANT)
+# FORMAT OUTPUT
+# =========================
+def format_prediction(pred):
+    try:
+        return {
+            "prediction": pred.get("label"),
+            "confidence": round(float(pred.get("confidence", 0.5)), 4),
+            "probabilities": pred.get("probs", {})
+        }
+    except:
+        return {
+            "prediction": "UNKNOWN",
+            "confidence": 0.0,
+            "probabilities": {}
+        }
+
+
+# =========================
+# DEDUP CHECK
 # =========================
 async def is_already_queued(match_id: int) -> bool:
     if not match_id:
@@ -35,7 +57,6 @@ async def is_already_queued(match_id: int) -> bool:
     if exists:
         return True
 
-    # mark as queued
     await redis_client.set(key, "1", ex=DEDUP_TTL)
     return False
 
@@ -50,11 +71,9 @@ async def safe_enqueue(match: dict):
 
     match_id = match.get("id")
 
-    # 🚫 skip duplicates
     if await is_already_queued(match_id):
         return False
 
-    # 🔒 rate limiter (protect Redis + downstream APIs)
     allowed = await acquire_slot()
     if not allowed:
         await asyncio.sleep(0.2)
@@ -66,62 +85,63 @@ async def safe_enqueue(match: dict):
 
 
 # =========================
-# PRODUCER ENGINE
+# 🔥 MAIN ENGINE (HYBRID)
 # =========================
 async def run_live_predictions():
 
     try:
-        matches = []
+        # -------------------------
+        # 1. GET MATCHES
+        # -------------------------
+        matches_data = await get_live_matches()
+        matches = matches_data.get("matches", []) if isinstance(matches_data, dict) else []
 
-        # =========================
-        # 1. TRY LIVE MATCHES (API-FOOTBALL FIRST)
-        # =========================
-        try:
-            matches_data = await get_live_matches()
-
-            # handle API-Football 403 or bad response safely
-            if isinstance(matches_data, dict):
-                matches = matches_data.get("matches", []) or []
-        except Exception as e:
-            logger.warning(f"API-Football live fetch failed: {e}")
-            matches = []
-
-        # =========================
-        # 2. FALLBACK (football-data.org)
-        # =========================
+        # fallback → upcoming
         if not matches:
-            try:
-                matches_data = await get_upcoming_matches()
-                if isinstance(matches_data, dict):
-                    matches = matches_data.get("matches", []) or []
-            except Exception as e:
-                logger.error(f"Fallback fetch failed: {e}")
-                matches = []
+            matches_data = await get_upcoming_matches()
+            matches = matches_data.get("matches", []) if isinstance(matches_data, dict) else []
 
-        # =========================
-        # 3. HARD SAFETY CHECK
-        # =========================
         if not matches:
             return {
                 "status": "empty",
                 "data": [],
-                "message": "No live matches available from any provider"
+                "message": "No matches available"
             }
 
-        # =========================
-        # 4. PROCESS MATCHES
-        # =========================
-        tasks = [safe_enqueue(match) for match in matches]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        # -------------------------
+        # 2. GET ODDS
+        # -------------------------
+        odds_list = await get_odds()
+        odds_map = {o["match_key"]: o for o in odds_list}
 
-        queued = sum(1 for r in results if r is True)
+        results = []
+
+        # -------------------------
+        # 3. PROCESS MATCHES
+        # -------------------------
+        for match in matches:
+
+            # 🔥 BUILD FEATURES
+            features = await build_real_features(match, odds_map)
+
+            # 🔥 PREDICT
+            pred = predict(features)
+
+            # 🔥 FORMAT
+            formatted = format_prediction(pred)
+
+            # 🔥 QUEUE IN BACKGROUND
+            asyncio.create_task(safe_enqueue(match))
+
+            results.append({
+                "match": match,
+                "prediction": formatted
+            })
 
         return {
-            "status": "queued",
-            "total_matches": len(matches),
-            "queued": queued,
-            "skipped": len(matches) - queued,
-            "message": "Matches pushed to prediction queue"
+            "status": "success",
+            "total": len(results),
+            "data": results
         }
 
     except Exception as e:
