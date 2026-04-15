@@ -1,8 +1,15 @@
 import os
+import asyncio
+import logging
 import httpx
 from dotenv import load_dotenv
 
+from core.rate_limiter import acquire_slot
+
 load_dotenv()
+
+logger = logging.getLogger("football-api")
+logging.basicConfig(level=logging.INFO)
 
 # =========================
 # API KEYS
@@ -28,26 +35,42 @@ RAPID_HEADERS = {
 
 
 # =========================
-# SAFE FETCH (SMART + DEBUG)
+# SHARED HTTP CLIENT (PERF BOOST)
 # =========================
-async def fetch(url: str, headers=None, params=None):
-    try:
-        async with httpx.AsyncClient(timeout=15) as client:
+client = httpx.AsyncClient(timeout=10)
+
+
+# =========================
+# SMART FETCH (RETRY + RATE LIMIT)
+# =========================
+async def fetch(url: str, headers=None, params=None, retries=2):
+
+    for attempt in range(retries + 1):
+
+        try:
+            # 🔒 global rate limiter
+            allowed = await acquire_slot()
+            if not allowed:
+                await asyncio.sleep(0.3)
+
             r = await client.get(url, headers=headers, params=params)
 
+            if r.status_code == 200:
+                return r.json()
+
             if r.status_code == 429:
-                print(f"⚠️ RATE LIMIT HIT → {url}")
-                return None
+                logger.warning(f"⚠️ 429 Rate limit → retry {attempt+1}")
+                await asyncio.sleep(1.5 * (attempt + 1))
+                continue
 
-            if r.status_code != 200:
-                print(f"❌ API ERROR {r.status_code} → {url}")
-                return None
+            logger.warning(f"❌ API {r.status_code} → {url}")
+            return None
 
-            return r.json()
+        except Exception as e:
+            logger.error(f"❌ Fetch error: {e}")
+            await asyncio.sleep(0.5)
 
-    except Exception as e:
-        print(f"❌ FETCH ERROR → {e}")
-        return None
+    return None
 
 
 # =========================
@@ -62,7 +85,7 @@ def safe_list(data):
 
 
 # =========================
-# NORMALIZERS (CRITICAL FIX)
+# NORMALIZERS
 # =========================
 def normalize_fd_match(m):
     try:
@@ -71,7 +94,6 @@ def normalize_fd_match(m):
             "league": m.get("competition", {}).get("name"),
             "timestamp": m.get("utcDate"),
             "status": m.get("status"),
-
             "homeTeam": {
                 "id": m.get("homeTeam", {}).get("id"),
                 "name": m.get("homeTeam", {}).get("name")
@@ -81,7 +103,7 @@ def normalize_fd_match(m):
                 "name": m.get("awayTeam", {}).get("name")
             }
         }
-    except:
+    except Exception:
         return None
 
 
@@ -92,7 +114,6 @@ def normalize_rapid_match(m):
             "league": m.get("league", {}).get("name"),
             "timestamp": m.get("fixture", {}).get("date"),
             "status": m.get("fixture", {}).get("status", {}).get("short"),
-
             "homeTeam": {
                 "id": m.get("teams", {}).get("home", {}).get("id"),
                 "name": m.get("teams", {}).get("home", {}).get("name")
@@ -102,16 +123,16 @@ def normalize_rapid_match(m):
                 "name": m.get("teams", {}).get("away", {}).get("name")
             }
         }
-    except:
+    except Exception:
         return None
 
 
 # =========================
-# LIVE MATCHES (RAPID → FD FALLBACK)
+# LIVE MATCHES
 # =========================
 async def get_live_matches():
 
-    # ✅ PRIMARY: RAPID API
+    # ✅ RAPID FIRST
     if RAPID_API_KEY:
         data = await fetch(
             f"{RAPID_BASE}/fixtures",
@@ -126,7 +147,7 @@ async def get_live_matches():
         if cleaned:
             return {"matches": cleaned}
 
-    # ⚠️ FALLBACK: FOOTBALL DATA
+    # ⚠️ FALLBACK
     if FD_API_KEY:
         data = await fetch(
             f"{FD_BASE}/matches",
@@ -155,27 +176,26 @@ async def get_upcoming_matches():
         )
 
         matches = safe_list(data.get("response") if data else [])
-        cleaned = [normalize_rapid_match(m) for m in matches]
-
-        return {"matches": [m for m in cleaned if m]}
+        return {"matches": [normalize_rapid_match(m) for m in matches if m]}
 
     if FD_API_KEY:
         data = await fetch(f"{FD_BASE}/matches", headers=FD_HEADERS)
 
         matches = safe_list(data.get("matches") if data else [])
-        cleaned = [normalize_fd_match(m) for m in matches]
-
-        return {"matches": [m for m in cleaned if m]}
+        return {"matches": [normalize_fd_match(m) for m in matches if m]}
 
     return {"matches": []}
 
 
 # =========================
-# TEAM STATS (SMART HYBRID)
+# TEAM STATS
 # =========================
 async def get_team_stats(team_id: int):
 
-    # ✅ TRY RAPID FIRST (better data)
+    if not team_id:
+        return {}
+
+    # ✅ RAPID FIRST
     if RAPID_API_KEY:
         data = await fetch(
             f"{RAPID_BASE}/teams",
@@ -196,59 +216,3 @@ async def get_team_stats(team_id: int):
         return safe_dict(data)
 
     return {}
-
-
-# =========================
-# ODDS (NORMALIZED CLEAN)
-# =========================
-async def get_match_odds(sport="soccer_epl"):
-
-    if not ODDS_API_KEY:
-        return []
-
-    data = await fetch(
-        f"{ODDS_BASE}/sports/{sport}/odds",
-        params={
-            "apiKey": ODDS_API_KEY,
-            "regions": "eu",
-            "markets": "h2h",
-            "oddsFormat": "decimal"
-        }
-    )
-
-    raw = safe_list(data)
-
-    normalized = []
-
-    for game in raw:
-        try:
-            bookmakers = game.get("bookmakers", [])
-            if not bookmakers:
-                continue
-
-            outcomes = bookmakers[0].get("markets", [{}])[0].get("outcomes", [])
-
-            odds = {"home": 2.0, "draw": 3.2, "away": 2.0}
-
-            for o in outcomes:
-                name = o.get("name", "").lower()
-                price = float(o.get("price", 2.0))
-
-                if "draw" in name:
-                    odds["draw"] = price
-                elif odds["home"] == 2.0:
-                    odds["home"] = price
-                else:
-                    odds["away"] = price
-
-            normalized.append({
-                "id": game.get("id"),
-                "home": odds["home"],
-                "draw": odds["draw"],
-                "away": odds["away"]
-            })
-
-        except:
-            continue
-
-    return normalized
