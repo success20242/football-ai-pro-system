@@ -16,7 +16,7 @@ API_KEY = os.getenv("ODDS_API_KEY")
 BASE_URL = "https://api.the-odds-api.com/v4/sports/soccer_epl/odds"
 
 # =========================
-# SHARED CLIENT (PERFORMANCE)
+# SHARED CLIENT
 # =========================
 client = httpx.AsyncClient(timeout=10)
 
@@ -27,9 +27,7 @@ client = httpx.AsyncClient(timeout=10)
 async def fetch(params: dict, retries=2):
 
     for attempt in range(retries + 1):
-
         try:
-            # 🔒 global limiter
             allowed = await acquire_slot()
             if not allowed:
                 await asyncio.sleep(0.3)
@@ -56,17 +54,39 @@ async def fetch(params: dict, retries=2):
 
 
 # =========================
+# TEAM NAME NORMALIZER 🔥
+# =========================
+def normalize_team(name: str):
+    if not name:
+        return ""
+
+    name = name.lower().strip()
+
+    replacements = {
+        "fc": "",
+        "cf": "",
+        "afc": "",
+        "club": ""
+    }
+
+    for k, v in replacements.items():
+        name = name.replace(k, v)
+
+    return " ".join(name.split())  # clean spaces
+
+
+# =========================
 # IMPLIED PROBABILITY
 # =========================
 def implied_prob(odds: float):
     try:
         return 1.0 / float(odds) if odds else 0.0
-    except Exception:
+    except:
         return 0.0
 
 
 # =========================
-# NORMALIZE GAME (ROBUST)
+# NORMALIZE GAME (IMPROVED)
 # =========================
 def normalize_game(game: dict):
 
@@ -74,15 +94,22 @@ def normalize_game(game: dict):
         if not isinstance(game, dict):
             return None
 
-        game_id = game.get("id")
-        home_team = (game.get("home_team") or "").lower()
-        away_team = (game.get("away_team") or "").lower()
+        raw_home = game.get("home_team")
+        raw_away = game.get("away_team")
+
+        home_team = normalize_team(raw_home)
+        away_team = normalize_team(raw_away)
+
+        if not home_team or not away_team:
+            return None
 
         bookmakers = game.get("bookmakers", [])
         if not bookmakers:
             return None
 
-        # ✅ find first valid market
+        # -------------------------
+        # FIND VALID MARKET
+        # -------------------------
         outcomes = None
         for bm in bookmakers:
             for market in bm.get("markets", []):
@@ -98,21 +125,21 @@ def normalize_game(game: dict):
         odds = {"home": None, "away": None, "draw": None}
 
         # -------------------------
-        # MATCH BY NAME FIRST
+        # MATCH BY TEAM NAME
         # -------------------------
         for o in outcomes:
-            name = (o.get("name") or "").lower()
+            name = normalize_team(o.get("name"))
             price = float(o.get("price") or 2.0)
 
             if "draw" in name:
                 odds["draw"] = price
-            elif home_team and name == home_team:
+            elif name == home_team:
                 odds["home"] = price
-            elif away_team and name == away_team:
+            elif name == away_team:
                 odds["away"] = price
 
         # -------------------------
-        # FALLBACK ORDER MATCH
+        # FALLBACK (ORDER BASED)
         # -------------------------
         for o in outcomes:
             price = float(o.get("price") or 2.0)
@@ -134,20 +161,25 @@ def normalize_game(game: dict):
         draw_p = implied_prob(draw)
         away_p = implied_prob(odds["away"])
 
-        # normalize probabilities (remove bookmaker margin)
         total = home_p + draw_p + away_p
         if total > 0:
             home_p /= total
             draw_p /= total
             away_p /= total
 
+        # 🔥 KEY FIX (MATCHING ENGINE)
+        match_key = f"{home_team}_{away_team}"
+
         return {
-            "match_id": game_id,   # 🔥 unified key (IMPORTANT)
+            "match_key": match_key,
+
+            "home_team": home_team,
+            "away_team": away_team,
+
             "home": float(odds["home"]),
             "draw": float(draw),
             "away": float(odds["away"]),
 
-            # 🔥 clean model-ready probabilities
             "probs": {
                 "home": round(home_p, 4),
                 "draw": round(draw_p, 4),
