@@ -4,34 +4,47 @@ from features.market_model import market_vector
 
 
 # =========================
+# TEAM NAME NORMALIZER (MUST MATCH odds_api)
+# =========================
+def normalize_team(name: str):
+    if not name:
+        return ""
+
+    name = name.lower().strip()
+
+    replacements = {
+        "fc": "",
+        "cf": "",
+        "afc": "",
+        "club": ""
+    }
+
+    for k, v in replacements.items():
+        name = name.replace(k, v)
+
+    return " ".join(name.split())
+
+
+# =========================
 # SAFE TEAM ID EXTRACTOR
 # =========================
 def get_team_id(team):
-    """
-    Supports:
-    - {"id": 123, "name": "..."}
-    - "Arsenal" (unsupported → fallback)
-    """
     if isinstance(team, dict):
         return team.get("id")
     return None
 
 
 # =========================
-# SAFE TEAM STRENGTH (ROBUST)
+# TEAM STRENGTH (IMPROVED)
 # =========================
 def team_strength(team_data: dict):
     if not isinstance(team_data, dict):
         return 0.5
 
-    # RapidAPI structure fix
-    if "team" in team_data:
-        team_data = team_data.get("team", {})
-
     squad = team_data.get("squad", [])
     squad_size = len(squad) if isinstance(squad, list) else 0
 
-    # fallback if no squad info
+    # fallback
     if squad_size == 0:
         return 0.5
 
@@ -41,19 +54,23 @@ def team_strength(team_data: dict):
 
 
 # =========================
-# SAFE ODDS EXTRACTOR (FIXED KEY ALIGNMENT)
+# 🔥 FIXED ODDS EXTRACTOR (MATCH_KEY BASED)
 # =========================
 def extract_odds(match, odds_map):
-    """
-    Ensures alignment with odds_api (id key)
-    """
 
     if not isinstance(odds_map, dict):
         return 2.0, 3.2, 2.0
 
-    match_id = match.get("id")
+    home_name = normalize_team(
+        match.get("homeTeam", {}).get("name")
+    )
+    away_name = normalize_team(
+        match.get("awayTeam", {}).get("name")
+    )
 
-    odds = odds_map.get(match_id, {}) if match_id else {}
+    match_key = f"{home_name}_{away_name}"
+
+    odds = odds_map.get(match_key, {})
 
     return (
         float(odds.get("home", 2.0)),
@@ -63,7 +80,7 @@ def extract_odds(match, odds_map):
 
 
 # =========================
-# FINAL FEATURE ENGINE (LOCKED TO 3 FEATURES)
+# FINAL FEATURE ENGINE (ROBUST)
 # =========================
 async def build_real_features(match, odds_map=None):
 
@@ -77,20 +94,20 @@ async def build_real_features(match, odds_map=None):
         home_id = get_team_id(home_team)
         away_id = get_team_id(away_team)
 
-        # 🚨 CRITICAL: fallback for manual /predict inputs
-        if home_id is None or away_id is None:
-            return [0.0, 0.0, 0.0]
-
         # -------------------------
-        # TEAM DATA FETCH (SAFE PARALLEL)
+        # TEAM DATA FETCH
         # -------------------------
-        try:
-            home_data, away_data = await asyncio.gather(
-                get_team_stats(home_id),
-                get_team_stats(away_id)
-            )
-        except Exception:
-            return [0.0, 0.0, 0.0]
+        if home_id and away_id:
+            try:
+                home_data, away_data = await asyncio.gather(
+                    get_team_stats(home_id),
+                    get_team_stats(away_id)
+                )
+            except Exception:
+                home_data, away_data = {}, {}
+        else:
+            # fallback if IDs missing (manual input case)
+            home_data, away_data = {}, {}
 
         # -------------------------
         # STRENGTH FEATURE
@@ -114,9 +131,9 @@ async def build_real_features(match, odds_map=None):
         # FINAL VECTOR (STRICT = 3)
         # =========================
         return [
-            float(strength_diff),
-            float(market_strength),
-            float(xg_diff)
+            round(float(strength_diff), 4),
+            round(float(market_strength), 4),
+            round(float(xg_diff), 4)
         ]
 
     except Exception as e:
