@@ -12,75 +12,94 @@ logger = logging.getLogger("football-api")
 logging.basicConfig(level=logging.INFO)
 
 # =========================
-# API KEYS
+# API CONFIG
 # =========================
 FD_API_KEY = os.getenv("FOOTBALL_DATA_API_KEY")
-
 FD_BASE = "https://api.football-data.org/v4"
 
-FD_HEADERS = {"X-Auth-Token": FD_API_KEY} if FD_API_KEY else {}
+FD_HEADERS = {
+    "X-Auth-Token": FD_API_KEY
+} if FD_API_KEY else {}
 
-client = httpx.AsyncClient(timeout=10)
+client = httpx.AsyncClient(timeout=15)
 
 
 # =========================
-# FETCH (SAFE)
+# SAFE FETCH (ROBUST)
 # =========================
-async def fetch(url: str, params=None, retries=2):
+async def fetch(url: str, params=None, retries=3):
 
-    for attempt in range(retries + 1):
+    for attempt in range(retries):
 
         try:
-            allowed = await acquire_slot()
-            if not allowed:
-                await asyncio.sleep(0.3)
+            await acquire_slot()
 
-            r = await client.get(url, headers=FD_HEADERS, params=params)
+            r = await client.get(
+                url,
+                headers=FD_HEADERS,
+                params=params
+            )
 
+            # ✅ SUCCESS
             if r.status_code == 200:
                 return r.json()
 
+            # ⚠️ RATE LIMIT
             if r.status_code == 429:
-                await asyncio.sleep(1.5 * (attempt + 1))
+                wait = 1.5 * (attempt + 1)
+                logger.warning(f"Rate limited → retrying in {wait}s")
+                await asyncio.sleep(wait)
                 continue
 
+            # ❌ OTHER ERRORS (log for debugging)
+            logger.warning(f"API error {r.status_code} → {url}")
             return None
 
-        except Exception:
+        except Exception as e:
+            logger.error(f"Fetch exception: {e}")
             await asyncio.sleep(0.5)
 
     return None
 
 
 # =========================
-# NORMALIZE
+# NORMALIZE MATCH (SAFE)
 # =========================
 def normalize_match(m):
+
+    if not isinstance(m, dict):
+        return None
+
     try:
         return {
             "id": m.get("id"),
-            "league": m.get("competition", {}).get("name"),
+            "league": (m.get("competition") or {}).get("name"),
             "timestamp": m.get("utcDate"),
             "status": m.get("status"),
+
             "homeTeam": {
-                "id": m.get("homeTeam", {}).get("id"),
-                "name": m.get("homeTeam", {}).get("name")
+                "id": (m.get("homeTeam") or {}).get("id"),
+                "name": (m.get("homeTeam") or {}).get("name")
             },
+
             "awayTeam": {
-                "id": m.get("awayTeam", {}).get("id"),
-                "name": m.get("awayTeam", {}).get("name")
+                "id": (m.get("awayTeam") or {}).get("id"),
+                "name": (m.get("awayTeam") or {}).get("name")
             }
         }
-    except:
+
+    except Exception as e:
+        logger.warning(f"Normalize error: {e}")
         return None
 
 
 # =========================
-# LIVE MATCHES
+# LIVE MATCHES (PRIMARY SOURCE)
 # =========================
 async def get_live_matches():
 
     if not FD_API_KEY:
+        logger.error("Missing FOOTBALL_DATA_API_KEY")
         return {"matches": []}
 
     data = await fetch(
@@ -88,10 +107,18 @@ async def get_live_matches():
         params={"status": "LIVE"}
     )
 
-    matches = data.get("matches", []) if data else []
+    if not data:
+        return {"matches": []}
 
-    cleaned = [normalize_match(m) for m in matches]
-    return {"matches": [m for m in cleaned if m]}
+    matches = data.get("matches", []) if isinstance(data, dict) else []
+
+    cleaned = []
+    for m in matches:
+        nm = normalize_match(m)
+        if nm:
+            cleaned.append(nm)
+
+    return {"matches": cleaned}
 
 
 # =========================
@@ -104,14 +131,22 @@ async def get_upcoming_matches():
 
     data = await fetch(f"{FD_BASE}/matches")
 
-    matches = data.get("matches", []) if data else []
+    if not data:
+        return {"matches": []}
 
-    cleaned = [normalize_match(m) for m in matches]
-    return {"matches": [m for m in cleaned if m]}
+    matches = data.get("matches", []) if isinstance(data, dict) else []
+
+    cleaned = []
+    for m in matches:
+        nm = normalize_match(m)
+        if nm:
+            cleaned.append(nm)
+
+    return {"matches": cleaned}
 
 
 # =========================
-# TEAM STATS
+# TEAM STATS (SAFE)
 # =========================
 async def get_team_stats(team_id: int):
 
