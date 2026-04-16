@@ -1,45 +1,78 @@
 import math
 
+
+# =========================
+# IMPLIED PROBABILITY
+# =========================
 def implied_prob(decimal_odds: float) -> float:
-    """
-    Convert bookmaker odds → implied probability
-    (before normalization)
-    """
-    if decimal_odds <= 0:
+    if not decimal_odds or decimal_odds <= 0:
         return 0.0
     return 1.0 / decimal_odds
 
 
+# =========================
+# NORMALIZE (REMOVE VIG)
+# =========================
 def normalize_probs(probs: dict) -> dict:
-    """
-    Remove bookmaker margin (vig)
-    """
     total = sum(probs.values())
+
+    if total == 0:
+        return {"home": 0.33, "draw": 0.34, "away": 0.33}
+
     return {k: v / total for k, v in probs.items()}
 
 
+# =========================
+# SAFE EXTRACTOR (FIXED)
+# =========================
 def extract_match_probs(odds_match: dict):
-    """
-    Convert raw API odds → clean probability structure
-    """
 
-    outcomes = odds_match.get("bookmakers", [])[0]["markets"][0]["outcomes"]
+    try:
+        bookmakers = odds_match.get("bookmakers", [])
+        if not bookmakers:
+            raise ValueError("No bookmakers")
 
-    raw = {
-        "home": 0,
-        "draw": 0,
-        "away": 0
-    }
+        markets = bookmakers[0].get("markets", [])
+        if not markets:
+            raise ValueError("No markets")
 
-    for o in outcomes:
-        name = o["name"].lower()
-        prob = implied_prob(o["price"])
+        outcomes = markets[0].get("outcomes", [])
+        if not outcomes:
+            raise ValueError("No outcomes")
 
-        if "home" in name:
-            raw["home"] = prob
-        elif "draw" in name:
-            raw["draw"] = prob
-        else:
-            raw["away"] = prob
+        raw = {
+            "home": 0.0,
+            "draw": 0.0,
+            "away": 0.0
+        }
 
-    return normalize_probs(raw)
+        # -------------------------
+        # SMART DETECTION
+        # -------------------------
+        for o in outcomes:
+            name = o.get("name", "").lower()
+            price = o.get("price", 0)
+
+            prob = implied_prob(price)
+
+            # detect draw
+            if "draw" in name:
+                raw["draw"] = prob
+
+            # detect home/away by position fallback
+            elif raw["home"] == 0:
+                raw["home"] = prob
+            else:
+                raw["away"] = prob
+
+        return normalize_probs(raw)
+
+    except Exception as e:
+        print(f"⚠️ ODDS PARSE ERROR → {e}")
+
+        # SAFE fallback (prevents identical predictions issue)
+        return {
+            "home": 0.33,
+            "draw": 0.34,
+            "away": 0.33
+        }
