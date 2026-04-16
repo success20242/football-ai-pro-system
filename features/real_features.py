@@ -1,28 +1,26 @@
 import asyncio
+import re
 from data.football_api import get_team_stats
 from features.market_model import market_vector
 
 
 # =========================
-# TEAM NAME NORMALIZER (MUST MATCH odds_api)
+# TEAM NAME NORMALIZER (IMPROVED)
 # =========================
 def normalize_team(name: str):
     if not name:
         return ""
 
-    name = name.lower().strip()
+    name = name.lower()
 
-    replacements = {
-        "fc": "",
-        "cf": "",
-        "afc": "",
-        "club": ""
-    }
+    # remove special characters
+    name = re.sub(r'[^a-z0-9 ]', '', name)
 
-    for k, v in replacements.items():
-        name = name.replace(k, v)
+    # remove common suffixes
+    words = name.split()
+    words = [w for w in words if w not in ["fc", "cf", "afc", "club"]]
 
-    return " ".join(name.split())
+    return " ".join(words)
 
 
 # =========================
@@ -35,26 +33,25 @@ def get_team_id(team):
 
 
 # =========================
-# TEAM STRENGTH (IMPROVED)
+# TEAM STRENGTH (UPGRADED)
 # =========================
 def team_strength(team_data: dict):
     if not isinstance(team_data, dict):
         return 0.5
 
-    squad = team_data.get("squad", [])
-    squad_size = len(squad) if isinstance(squad, list) else 0
+    stats = team_data.get("statistics", {})
 
-    # fallback
-    if squad_size == 0:
+    wins = stats.get("wins", 0)
+    games = stats.get("played", 0)
+
+    if games == 0:
         return 0.5
 
-    strength = squad_size / 25
-
-    return min(1.5, max(0.2, strength))
+    return wins / games
 
 
 # =========================
-# 🔥 FIXED ODDS EXTRACTOR (MATCH_KEY BASED)
+# ODDS EXTRACTOR (DEBUG ENABLED)
 # =========================
 def extract_odds(match, odds_map):
 
@@ -70,6 +67,9 @@ def extract_odds(match, odds_map):
 
     match_key = f"{home_name}_{away_name}"
 
+    if match_key not in odds_map:
+        print(f"⚠️ ODDS NOT FOUND: {match_key}")
+
     odds = odds_map.get(match_key, {})
 
     return (
@@ -80,16 +80,13 @@ def extract_odds(match, odds_map):
 
 
 # =========================
-# FINAL FEATURE ENGINE (ROBUST)
-# =========================
-# =========================
-# FINAL FEATURE ENGINE (ENHANCED + UNIQUE)
+# FINAL FEATURE ENGINE (FIXED)
 # =========================
 async def build_real_features(match, odds_map=None):
 
     try:
         if not isinstance(match, dict):
-            return [0.0, 0.0, 0.0]
+            return [0.0, 0.0, 0.0, 0.0]
 
         home_team = match.get("homeTeam")
         away_team = match.get("awayTeam")
@@ -124,7 +121,7 @@ async def build_real_features(match, odds_map=None):
         # -------------------------
         home_odds, draw_odds, away_odds = extract_odds(match, odds_map)
 
-        # 🔥 CRITICAL FIX: implied probabilities
+        # implied probabilities
         try:
             home_prob = 1 / home_odds if home_odds else 0.33
             draw_prob = 1 / draw_odds if draw_odds else 0.33
@@ -140,21 +137,27 @@ async def build_real_features(match, odds_map=None):
             home_prob, draw_prob, away_prob = 0.33, 0.34, 0.33
 
         # -------------------------
-        # MARKET FEATURES (OPTIONAL BOOST)
+        # MARKET FEATURES
         # -------------------------
         mv = market_vector(home_odds, draw_odds, away_odds)
-
         market_strength = float(mv.get("strength_diff", 0.0))
 
         # -------------------------
-        # 🔥 FINAL VECTOR (MODEL = 3 FEATURES)
+        # UNIQUE MATCH FEATURE (IMPORTANT)
+        # -------------------------
+        match_id = match.get("id", 0)
+        match_uniqueness = (match_id % 1000) / 1000
+
+        # -------------------------
+        # FINAL FEATURE VECTOR
         # -------------------------
         return [
-            round(float(home_prob - away_prob), 4),   # core signal
+            round(float(home_prob - away_prob), 4),   # odds signal
             round(float(strength_diff), 4),           # team strength
-            round(float(market_strength), 4)          # market edge
+            round(float(market_strength), 4),         # market edge
+            round(float(match_uniqueness), 4)         # uniqueness
         ]
 
     except Exception as e:
         print(f"❌ FEATURE ERROR → {e}")
-        return [0.0, 0.0, 0.0]
+        return [0.0, 0.0, 0.0, 0.0]
