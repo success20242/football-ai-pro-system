@@ -7,12 +7,12 @@ from core.queue import (
     mark_processing,
     unmark_processing
 )
+
 from core.rate_limiter import team_stats_limit, odds_api_limit
 from data.odds_api import get_odds
 from features.real_features import build_real_features
 from models.predict import predict
 
-# ✅ BETTING EDGE IMPORT (ADDED FIX)
 from core.betting_edge import calculate_ev, get_bet_signal
 
 
@@ -24,7 +24,22 @@ logger = logging.getLogger("prediction-worker")
 
 
 # =========================
-# PROCESS FUNCTION
+# SAFE ODDS PARSER
+# =========================
+def extract_odds_safe(odds: dict):
+
+    if not isinstance(odds, dict):
+        return {"home": 2.0, "draw": 3.2, "away": 3.0}
+
+    return {
+        "home": float(odds.get("home", 2.0)),
+        "draw": float(odds.get("draw", 3.2)),
+        "away": float(odds.get("away", 3.0))
+    }
+
+
+# =========================
+# PROCESS FUNCTION (FIXED)
 # =========================
 async def process(payload):
 
@@ -50,12 +65,14 @@ async def process(payload):
     odds_list = await get_odds() or []
 
     odds_map = {
-        o.get("match_id"): o
+        o.get("id"): o
         for o in odds_list
         if isinstance(o, dict)
     }
 
-    odds = odds_map.get(match_id, {}) or {}
+    odds = odds_map.get(match_id, {})
+
+    odds = extract_odds_safe(odds)
 
     # -------------------------
     # FEATURES
@@ -72,35 +89,47 @@ async def process(payload):
     # -------------------------
     prediction = predict(features)
 
-    # =========================
-    # EXTRACT PROBABILITY
-    # =========================
-    if isinstance(prediction, dict):
-        prob = prediction.get("probability", 0.5)
+    if not isinstance(prediction, dict):
+        raise ValueError("Invalid prediction output")
+
+    label = prediction.get("label", "draw")
+    probs = prediction.get("probs", {})
+
+    # -------------------------
+    # SELECT PROBABILITY FOR EV
+    # -------------------------
+    if label == "home":
+        prob = probs.get("home", 0.33)
+        odds_used = odds["home"]
+
+    elif label == "away":
+        prob = probs.get("away", 0.33)
+        odds_used = odds["away"]
+
     else:
-        prob = float(prediction)
+        prob = probs.get("draw", 0.34)
+        odds_used = odds["draw"]
 
     # -------------------------
-    # ODDS HANDLING
+    # BETTING EDGE (CORRECTED)
     # -------------------------
-    home_odds = odds.get("home_odds", 2.0)
-
-    # =========================
-    # BETTING EDGE (NEW CORE FIX)
-    # =========================
-    ev = calculate_ev(prob, home_odds)
+    ev = calculate_ev(prob, odds_used)
     signal = get_bet_signal(ev)
 
-    logger.info(f"📊 EV={ev:.3f} | SIGNAL={signal} | match={match_id}")
+    logger.info(
+        f"📊 {label.upper()} | EV={ev:.3f} | SIGNAL={signal} | match={match_id}"
+    )
 
     return {
         "match_id": match_id,
         "features": features,
         "prediction": {
+            "label": label,
             "probability": prob,
-            "raw": prediction,
+            "odds_used": odds_used,
             "ev": ev,
-            "signal": signal
+            "signal": signal,
+            "probs": probs
         }
     }
 
@@ -109,6 +138,7 @@ async def process(payload):
 # WORKER LOOP
 # =========================
 async def worker():
+
     logger.info("🚀 Prediction worker running...")
 
     while True:
@@ -139,12 +169,12 @@ async def worker():
             await asyncio.sleep(0.1)
 
         except Exception as loop_error:
-            logger.error(f"💥 Worker loop crash recovered: {loop_error}")
+            logger.error(f"💥 Worker crash recovered: {loop_error}")
             await asyncio.sleep(1)
 
 
 # =========================
-# BOOTSTRAP FIX
+# BOOTSTRAP
 # =========================
 async def main():
     logger.info("🚀 Starting prediction worker...")
