@@ -10,22 +10,25 @@ MODEL_PATH = os.getenv("MODEL_PATH", "models/model.pkl")
 
 try:
     model = joblib.load(MODEL_PATH)
+
+    # SAFE CLASS MAPPING
     CLASS_MAP = list(getattr(model, "classes_", ["home", "draw", "away"]))
+
     logger.info(f"✅ Model loaded: {MODEL_PATH}")
+    logger.info(f"📊 Class order: {CLASS_MAP}")
+
 except Exception as e:
     logger.error(f"❌ Failed to load model: {e}")
     model = None
     CLASS_MAP = ["home", "draw", "away"]
 
-EXPECTED_FEATURES = 3
-
 
 # =========================
-# FEATURE NORMALIZER
+# AUTO FEATURE HANDLING
 # =========================
 def normalize_features(features):
     if not isinstance(features, (list, tuple, np.ndarray)):
-        features = [0.0] * EXPECTED_FEATURES
+        features = []
 
     cleaned = []
     for f in features:
@@ -34,15 +37,11 @@ def normalize_features(features):
         except:
             cleaned.append(0.0)
 
-    cleaned = cleaned[:EXPECTED_FEATURES]
-    while len(cleaned) < EXPECTED_FEATURES:
-        cleaned.append(0.0)
-
     return np.array(cleaned, dtype=float).reshape(1, -1)
 
 
 # =========================
-# CORE PREDICTION
+# CORE PREDICTION (FIXED)
 # =========================
 def predict(features):
     try:
@@ -54,24 +53,26 @@ def predict(features):
         if not np.isfinite(X).all():
             raise ValueError("Invalid features")
 
+        # -------------------------
+        # PREDICT PROBABILITIES
+        # -------------------------
         probs = model.predict_proba(X)[0]
 
+        # SAFETY CHECK
+        if len(probs) != len(CLASS_MAP):
+            raise ValueError("Model class mismatch")
+
         # -------------------------
-        # MAP CLASS INDEXES
+        # MAP DYNAMICALLY (IMPORTANT FIX)
         # -------------------------
-        home_p = float(probs[0]) if len(probs) > 0 else 0.33
-        draw_p = float(probs[1]) if len(probs) > 1 else 0.33
-        away_p = float(probs[2]) if len(probs) > 2 else 0.33
+        values = {
+            CLASS_MAP[i]: float(probs[i])
+            for i in range(len(CLASS_MAP))
+        }
 
         # -------------------------
         # BEST LABEL
         # -------------------------
-        values = {
-            "home": home_p,
-            "draw": draw_p,
-            "away": away_p
-        }
-
         label = max(values, key=values.get)
         confidence = values[label]
 
