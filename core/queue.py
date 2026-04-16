@@ -1,7 +1,10 @@
 import json
 import asyncio
+import logging
 from typing import Optional, Dict, Any
 from core.redis_client import redis_client
+
+logger = logging.getLogger("queue")
 
 QUEUE_KEY = "football:prediction_queue"
 RETRY_KEY = "football:prediction_retry"
@@ -16,15 +19,19 @@ RETRY_DELAY = 5  # seconds
 # =========================
 def safe_json_load(data):
     try:
+        if isinstance(data, bytes):
+            data = data.decode("utf-8")
         return json.loads(data)
-    except Exception:
+    except Exception as e:
+        logger.warning(f"JSON LOAD ERROR: {e}")
         return None
 
 
 def safe_json_dump(data):
     try:
         return json.dumps(data)
-    except Exception:
+    except Exception as e:
+        logger.warning(f"JSON DUMP ERROR: {e}")
         return "{}"
 
 
@@ -32,121 +39,121 @@ def safe_json_dump(data):
 # ENQUEUE
 # =========================
 async def enqueue_prediction(match: Dict[str, Any]):
-    """
-    Add match to queue
-    """
-    payload = {
-        "data": match,
-        "retries": 0
-    }
-
+    payload = {"data": match, "retries": 0}
     await redis_client.rpush(QUEUE_KEY, safe_json_dump(payload))
 
 
 # =========================
-# DEQUEUE
+# DEQUEUE (MAIN + RETRY SAFE)
 # =========================
 async def dequeue_prediction() -> Optional[Dict[str, Any]]:
-    """
-    Pop from queue safely
-    """
+
+    # 1st try main queue
     raw = await redis_client.lpop(QUEUE_KEY)
+
+    # fallback retry queue
+    if not raw:
+        raw = await redis_client.lpop(RETRY_KEY)
 
     if not raw:
         return None
 
-    payload = safe_json_load(raw)
-    if not payload:
-        return None
-
-    return payload
+    return safe_json_load(raw)
 
 
 # =========================
-# MARK PROCESSING (LOCK)
+# PROCESSING LOCK
 # =========================
 async def mark_processing(match_id):
-    await redis_client.sadd(PROCESSING_KEY, match_id)
+    if match_id:
+        await redis_client.sadd(PROCESSING_KEY, match_id)
 
 
 async def unmark_processing(match_id):
-    await redis_client.srem(PROCESSING_KEY, match_id)
+    if match_id:
+        await redis_client.srem(PROCESSING_KEY, match_id)
 
 
 # =========================
-# RETRY LOGIC
+# RETRY SYSTEM (FIXED)
 # =========================
 async def retry_prediction(payload: Dict[str, Any]):
-    """
-    Push failed jobs into retry queue with delay
-    """
+
+    if not isinstance(payload, dict):
+        return
+
     retries = payload.get("retries", 0)
 
     if retries >= MAX_RETRIES:
-        return  # drop permanently
+        logger.warning("❌ DROPPED JOB (max retries reached)")
+        return
 
     payload["retries"] = retries + 1
 
-    # delay before retry
+    # small backoff (non-blocking system-wide impact)
     await asyncio.sleep(RETRY_DELAY)
 
     await redis_client.rpush(RETRY_KEY, safe_json_dump(payload))
 
 
+# =========================
+# BACKLOG RECOVERY LOOP
+# =========================
 async def requeue_failed():
-    """
-    Move retry queue back into main queue
-    """
+
     while True:
         raw = await redis_client.lpop(RETRY_KEY)
 
         if not raw:
-            break
+            await asyncio.sleep(5)
+            continue
 
         await redis_client.rpush(QUEUE_KEY, raw)
 
 
 # =========================
-# RATE LIMIT CONTROL
+# RATE LIMIT
 # =========================
 async def throttle(rate_limit: int = 5):
-    """
-    Simple rate limiter:
-    allows X requests per second
-    """
     await asyncio.sleep(1 / rate_limit)
 
 
 # =========================
-# WORKER LOOP (IMPORTANT)
+# WORKER LOOP (HARDENED)
 # =========================
 async def worker(process_func):
-    """
-    process_func = async function(match_dict)
-    """
+
+    logger.info("🚀 Worker started")
 
     while True:
+
         payload = await dequeue_prediction()
 
         if not payload:
             await asyncio.sleep(1)
             continue
 
-        match = payload.get("data")
-        match_id = match.get("id") if isinstance(match, dict) else None
-
         try:
-            if match_id:
-                await mark_processing(match_id)
+            match = payload.get("data") if isinstance(payload, dict) else None
 
-            # 🔥 throttle API calls
+            if not isinstance(match, dict):
+                continue
+
+            match_id = match.get("id")
+
+            await mark_processing(match_id)
             await throttle(5)
 
             await process_func(match)
 
-        except Exception:
+        except Exception as e:
+            logger.error(f"⚠️ Worker error: {e}")
             await retry_prediction(payload)
 
         finally:
-            if match_id:
-                await unmark_processing(match_id)
+            try:
+                if isinstance(payload, dict):
+                    match = payload.get("data", {})
+                    await unmark_processing(match.get("id"))
+            except:
+                pass
