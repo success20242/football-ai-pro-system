@@ -1,19 +1,40 @@
-def calculate_ev(probability: float, odds: float) -> float:
+def calculate_ev(probability: float, odds: float, confidence: float = 1.0) -> float:
     """
-    Expected Value for decimal odds
+    Expected Value (calibrated version)
+
+    Adds confidence weighting to reduce false positives
     """
+
     if not probability or not odds:
         return -1.0
 
-    return (probability * odds) - 1
+    base_ev = (probability * odds) - 1
+
+    # confidence dampening (critical upgrade)
+    adjusted_ev = base_ev * confidence
+
+    return round(adjusted_ev, 5)
 
 
-def get_bet_signal(ev: float) -> str:
+# =========================
+# DYNAMIC BET SIGNAL ENGINE
+# =========================
+def get_bet_signal(ev: float, probability: float = 0.0, confidence: float = 1.0) -> str:
+
+    # confidence-adjusted thresholds
+    confidence_factor = (probability * confidence)
+
+    # dynamic scaling (prevents overbetting weak models)
     if ev < 0:
         return "NO_BET"
-    elif ev < 0.05:
+
+    if confidence_factor < 0.35:
+        return "NO_BET"
+
+    if ev < 0.03:
         return "WEAK_EDGE"
-    elif ev < 0.10:
+
+    if ev < 0.08:
         return "BET"
-    else:
-        return "STRONG_BET"
+
+    return "STRONG_BET"
