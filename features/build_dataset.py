@@ -8,7 +8,14 @@ from utils.odds_utils import build_odds_map
 
 
 # =========================
-# BUILD REAL TRAINING DATASET
+# SAFE FEATURE NORMALIZER
+# =========================
+def safe_div(a, b):
+    return a / b if b else 0.0
+
+
+# =========================
+# BUILD REAL TRAINING DATASET (UPGRADED)
 # =========================
 async def build_dataset(competition="PL", limit=200):
 
@@ -27,14 +34,25 @@ async def build_dataset(competition="PL", limit=200):
             home_id = match["homeTeam"]["id"]
             away_id = match["awayTeam"]["id"]
 
+            # -------------------------
+            # xG DATA
+            # -------------------------
             home_xg = await get_team_xg(home_id)
             away_xg = await get_team_xg(away_id)
 
+            home_attack = home_xg.get("xg_for", 0)
+            home_def = home_xg.get("xg_against", 0)
+
+            away_attack = away_xg.get("xg_for", 0)
+            away_def = away_xg.get("xg_against", 0)
+
             # -------------------------
-            # REAL xG FEATURES
+            # NORMALIZED xG FEATURES
             # -------------------------
-            home_form = home_xg["xg_for"] - home_xg["xg_against"]
-            away_form = away_xg["xg_for"] - away_xg["xg_against"]
+            home_form = safe_div(home_attack - home_def, max(home_attack + home_def, 1))
+            away_form = safe_div(away_attack - away_def, max(away_attack + away_def, 1))
+
+            xg_diff = home_form - away_form
 
             # -------------------------
             # ODDS FEATURES
@@ -45,30 +63,54 @@ async def build_dataset(competition="PL", limit=200):
             draw_odds = match_odds.get("draw", 3.2)
             away_odds = match_odds.get("away", 3.0)
 
-            market_edge = (1 / home_odds) - (1 / away_odds)
+            # implied probabilities
+            h = safe_div(1, home_odds)
+            d = safe_div(1, draw_odds)
+            a = safe_div(1, away_odds)
+
+            total = h + d + a if (h + d + a) > 0 else 1
+
+            h, d, a = h / total, d / total, a / total
+
+            market_edge = h - a
+            draw_pressure = d
 
             # -------------------------
-            # LABEL (historical result)
+            # LABEL (CLEAN)
             # -------------------------
             score = match.get("score", {}).get("fullTime", {})
 
             if not score:
                 continue
 
-            if score["home"] > score["away"]:
-                result = 0
-            elif score["home"] == score["away"]:
+            home_goals = score.get("home", 0)
+            away_goals = score.get("away", 0)
+
+            # binary target (better for stability)
+            if home_goals > away_goals:
                 result = 1
             else:
-                result = 2
+                result = 0
 
+            # -------------------------
+            # FINAL ROW
+            # -------------------------
             dataset.append({
+                # xG signals
                 "home_form": home_form,
                 "away_form": away_form,
+                "xg_diff": xg_diff,
+
+                # market signals
                 "market_edge": market_edge,
+                "draw_pressure": draw_pressure,
+
+                # raw odds
                 "odds_home": home_odds,
                 "odds_draw": draw_odds,
                 "odds_away": away_odds,
+
+                # label
                 "result": result
             })
 
