@@ -7,8 +7,6 @@ import logging
 from models.predict import predict
 from engine.backtest import run_backtest
 from core.queue import enqueue_prediction
-
-# 🔥 NEW IMPORTS
 from data.odds_api import get_odds
 from features.real_features import build_real_features
 
@@ -65,21 +63,32 @@ def safe_match_dict(obj):
 
 
 def format_prediction(pred):
-    """
-    Convert raw model output into readable format
-    """
     try:
         return {
-            "prediction": pred.get("label"),
+            "label": pred.get("label"),
             "confidence": round(float(pred.get("confidence", 0.5)), 4),
             "probabilities": pred.get("probs", {})
         }
-    except:
+    except Exception:
         return {
-            "prediction": "UNKNOWN",
+            "label": "UNKNOWN",
             "confidence": 0.0,
             "probabilities": {}
         }
+
+
+def safe_odds_map(odds_list):
+    """
+    Prevent crashes from missing keys
+    """
+    if not isinstance(odds_list, list):
+        return {}
+
+    out = {}
+    for o in odds_list:
+        if isinstance(o, dict) and o.get("match_key"):
+            out[o["match_key"]] = o
+    return out
 
 
 # =========================
@@ -87,14 +96,11 @@ def format_prediction(pred):
 # =========================
 @app.get("/health")
 def health():
-    return {
-        "status": "healthy",
-        "service": "football-api"
-    }
+    return {"status": "healthy", "service": "football-api"}
 
 
 # =========================
-# 🔥 PREDICT (HYBRID: INSTANT + QUEUE)
+# 🔥 PREDICT
 # =========================
 @app.post("/predict")
 async def predict_endpoint(data: MatchInput):
@@ -102,33 +108,22 @@ async def predict_endpoint(data: MatchInput):
     try:
         match = safe_match_dict(data.match)
 
-        logger.info(f"Predict request: {match}")
-
-        # -------------------------
-        # 🔥 GET ODDS
-        # -------------------------
         odds_list = await get_odds()
-        odds_map = {o["match_key"]: o for o in odds_list}
+        odds_map = safe_odds_map(odds_list)
 
-        # -------------------------
-        # 🔥 BUILD FEATURES
-        # -------------------------
         features = await build_real_features(match, odds_map)
 
-        # -------------------------
-        # 🔥 RUN MODEL (INSTANT)
-        # -------------------------
+        if not isinstance(features, list):
+            features = [0.0, 0.0, 0.0]
+
         prediction = predict(features)
 
-        # -------------------------
-        # 🔥 ALSO QUEUE (ASYNC PIPELINE)
-        # -------------------------
         await enqueue_prediction(match)
 
         return {
             "status": "success",
             "instant_prediction": format_prediction(prediction),
-            "message": "Prediction returned + queued for processing"
+            "message": "Prediction returned + queued"
         }
 
     except Exception as e:
@@ -137,7 +132,7 @@ async def predict_endpoint(data: MatchInput):
 
 
 # =========================
-# 🔥 LIVE (REAL PREDICTIONS)
+# 🔥 LIVE
 # =========================
 @app.get("/live")
 async def live_predictions():
@@ -145,22 +140,21 @@ async def live_predictions():
     try:
         from data.football_api import get_live_matches
 
-        # -------------------------
-        # GET MATCHES
-        # -------------------------
         live_data = await get_live_matches()
         matches = live_data.get("matches", [])
 
-        # -------------------------
-        # GET ODDS
-        # -------------------------
         odds_list = await get_odds()
-        odds_map = {o["match_key"]: o for o in odds_list}
+        odds_map = safe_odds_map(odds_list)
 
         results = []
 
         for match in matches:
+
             features = await build_real_features(match, odds_map)
+
+            if not isinstance(features, list):
+                features = [0.0, 0.0, 0.0]
+
             pred = predict(features)
 
             results.append({
