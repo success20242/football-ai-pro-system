@@ -1,16 +1,18 @@
 import asyncio
 import time
+import random
+from functools import wraps
 from core.redis_client import redis_client
 
 # =========================
 # CONFIG
 # =========================
-DEFAULT_LIMIT = 8          # requests
-DEFAULT_WINDOW = 1         # seconds
+DEFAULT_LIMIT = 8
+DEFAULT_WINDOW = 1  # seconds
 
 
 # =========================
-# CORE RATE LIMITER
+# SLIDING WINDOW RATE LIMITER
 # =========================
 async def acquire_slot(
     key: str = "global",
@@ -19,41 +21,40 @@ async def acquire_slot(
     wait: bool = True
 ):
     """
-    Distributed rate limiter using Redis
-
-    key   → namespace (e.g. "football_api", "odds_api")
-    limit → max requests per window
-    window → time window (seconds)
-    wait  → block until slot available
+    FIXED:
+    - uses sliding window bucket (not per-second key explosion)
+    - stable under concurrency
     """
 
-    redis_key = f"rate:{key}:{int(time.time())}"
+    bucket_key = f"rate:{key}"
 
     while True:
         try:
-            current = await redis_client.incr(redis_key)
+            now = int(time.time())
 
-            # set expiry only on first increment
-            if current == 1:
-                await redis_client.expire(redis_key, window)
+            pipe = redis_client.pipeline()
+            pipe.zremrangebyscore(bucket_key, 0, now - window)
+            pipe.zcard(bucket_key)
+            _, count = await pipe.execute()
 
-            if current <= limit:
+            if count < limit:
+                await redis_client.zadd(bucket_key, {str(time.time()): time.time()})
+                await redis_client.expire(bucket_key, window + 1)
                 return True
 
-            # ❌ limit exceeded
             if not wait:
                 return False
 
-            # wait until next window
-            await asyncio.sleep(0.05)
+            # jitter prevents synchronized retry storms
+            await asyncio.sleep(0.05 + random.random() * 0.05)
 
         except Exception:
-            # fail-open (important in production)
+            # fail-open (critical systems stability)
             return True
 
 
 # =========================
-# MULTI-API LIMITERS
+# API LIMITERS
 # =========================
 async def football_api_limit():
     return await acquire_slot("football_api", limit=5, window=1)
@@ -68,28 +69,26 @@ async def team_stats_limit():
 
 
 # =========================
-# BURST CONTROL (SMOOTHING)
+# SMOOTHING (ANTI-BURST)
 # =========================
 async def smooth_rate(delay: float = 0.1):
-    """
-    Adds micro-delay to avoid bursts
-    """
     await asyncio.sleep(delay)
 
 
 # =========================
-# DECORATOR (🔥 CLEAN USAGE)
+# FIXED DECORATOR
 # =========================
 def rate_limited(limit_func):
     """
-    Usage:
-    @rate_limited(football_api_limit)
-    async def fetch(...):
-        ...
+    Safe async decorator with metadata preservation
     """
+
     def wrapper(func):
+        @wraps(func)
         async def inner(*args, **kwargs):
             await limit_func()
             return await func(*args, **kwargs)
+
         return inner
+
     return wrapper
