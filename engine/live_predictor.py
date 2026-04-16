@@ -3,7 +3,7 @@ import logging
 
 from data.football_api import get_live_matches, get_upcoming_matches
 from data.odds_api import get_odds
-from features.real_features import build_real_features
+from features.real_features import build_real_features, normalize_team
 from models.predict import predict
 
 from core.queue import enqueue_prediction
@@ -37,21 +37,16 @@ def format_prediction(pred: dict):
             "probabilities": {}
         }
 
-    prob = (
-        pred.get("probability")
-        or pred.get("confidence")
-        or 0.5
-    )
+    probs = pred if "home_win" in pred else {}
 
-    label = (
-        pred.get("label")
-        or ("HOME" if prob >= 0.5 else "AWAY")
-    )
+    # choose best outcome
+    label = max(probs, key=probs.get) if probs else "unknown"
+    confidence = float(max(probs.values())) if probs else 0.5
 
     return {
         "prediction": label,
-        "confidence": float(prob),
-        "probabilities": pred.get("probs", {})
+        "confidence": confidence,
+        "probabilities": probs
     }
 
 
@@ -95,7 +90,7 @@ async def safe_enqueue(match: dict):
 
 
 # =========================
-# MAIN ENGINE (FIXED + BETTING EDGE)
+# MAIN ENGINE (FINAL FIX)
 # =========================
 async def run_live_predictions():
 
@@ -118,23 +113,15 @@ async def run_live_predictions():
             }
 
         # -------------------------
-        # 2. ODDS (FIXED MAPPING)
+        # 2. ODDS (STRICT match_key)
         # -------------------------
         odds_list = await get_odds() or []
 
-        odds_map = {}
-        for o in odds_list:
-            if not isinstance(o, dict):
-                continue
-
-            key = (
-                o.get("match_id")
-                or o.get("match_key")
-                or o.get("id")
-            )
-
-            if key:
-                odds_map[key] = o
+        odds_map = {
+            o.get("match_key"): o
+            for o in odds_list
+            if isinstance(o, dict)
+        }
 
         results = []
 
@@ -143,40 +130,61 @@ async def run_live_predictions():
         # -------------------------
         for match in matches:
 
-            match_id = match.get("id")
+            try:
+                match_id = match.get("id")
 
-            # FEATURES
-            features = await build_real_features(match, odds_map)
+                # -------------------------
+                # FEATURES
+                # -------------------------
+                features = await build_real_features(match, odds_map)
 
-            if not isinstance(features, list):
-                features = [0.0, 0.0, 0.0]
+                if not isinstance(features, list):
+                    features = [0.0, 0.0, 0.0]
 
-            features = features[:3]
+                features = features[:3]
 
-            # PREDICT
-            pred = predict(features)
-            formatted = format_prediction(pred)
+                # -------------------------
+                # PREDICT
+                # -------------------------
+                pred = predict(features)
+                formatted = format_prediction(pred)
 
-            # ODDS
-            odds = odds_map.get(match_id, {}) or {}
-            home_odds = odds.get("home_odds", 2.0)
+                # -------------------------
+                # MATCH KEY (CRITICAL FIX)
+                # -------------------------
+                home_name = normalize_team(match.get("homeTeam", {}).get("name"))
+                away_name = normalize_team(match.get("awayTeam", {}).get("name"))
 
-            # BETTING EDGE
-            prob = formatted.get("confidence", 0.5)
-            ev = calculate_ev(prob, home_odds)
-            signal = get_bet_signal(ev)
+                match_key = f"{home_name}_{away_name}"
 
-            # QUEUE IN BACKGROUND
-            asyncio.create_task(safe_enqueue(match))
+                odds = odds_map.get(match_key, {}) or {}
 
-            results.append({
-                "match": match,
-                "prediction": {
-                    **formatted,
-                    "ev": ev,
-                    "signal": signal
-                }
-            })
+                home_odds = float(odds.get("home", 2.0))
+
+                # -------------------------
+                # BETTING EDGE
+                # -------------------------
+                home_prob = formatted["probabilities"].get("home_win", 0.33)
+
+                ev = calculate_ev(home_prob, home_odds)
+                signal = get_bet_signal(ev)
+
+                # -------------------------
+                # QUEUE BACKGROUND
+                # -------------------------
+                asyncio.create_task(safe_enqueue(match))
+
+                results.append({
+                    "match": match,
+                    "prediction": {
+                        **formatted,
+                        "ev": round(ev, 4),
+                        "signal": signal
+                    }
+                })
+
+            except Exception as e:
+                logger.warning(f"⚠️ Match skipped: {e}")
 
         return {
             "status": "success",
