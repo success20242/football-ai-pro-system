@@ -1,6 +1,7 @@
 import os
 import asyncio
 import logging
+import random
 import httpx
 from dotenv import load_dotenv
 
@@ -19,14 +20,14 @@ client = httpx.AsyncClient(timeout=10)
 
 
 # =========================
-# SAFE FETCH
+# SAFE FETCH (FIXED)
 # =========================
 async def fetch(params: dict, retries=2):
 
     for attempt in range(retries + 1):
+
         try:
-            if not await acquire_slot():
-                await asyncio.sleep(0.3)
+            await acquire_slot()
 
             r = await client.get(BASE_URL, params=params)
 
@@ -35,8 +36,9 @@ async def fetch(params: dict, retries=2):
                 return data if isinstance(data, list) else []
 
             if r.status_code == 429:
-                logger.warning(f"⚠️ ODDS 429 retry {attempt+1}")
-                await asyncio.sleep(1.5 * (attempt + 1))
+                wait = (1.5 * (attempt + 1)) + random.uniform(0.2, 1.0)
+                logger.warning(f"⚠️ ODDS 429 retry {attempt+1} in {wait:.2f}s")
+                await asyncio.sleep(wait)
                 continue
 
             logger.warning(f"❌ ODDS ERROR {r.status_code}")
@@ -44,31 +46,9 @@ async def fetch(params: dict, retries=2):
 
         except Exception as e:
             logger.error(f"❌ FETCH ERROR → {e}")
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.5 + random.random())
 
     return []
-
-
-# =========================
-# TEAM NORMALIZER (SYNC WITH FEATURES)
-# =========================
-def normalize_team(name: str):
-    if not name:
-        return ""
-
-    name = name.lower().strip()
-
-    replacements = {
-        "fc": "",
-        "cf": "",
-        "afc": "",
-        "club": ""
-    }
-
-    for k, v in replacements.items():
-        name = name.replace(k, v)
-
-    return " ".join(name.split())
 
 
 # =========================
@@ -76,24 +56,18 @@ def normalize_team(name: str):
 # =========================
 def implied_prob(odds: float):
     try:
-        return 1.0 / float(odds) if odds else 0.0
+        return 1.0 / float(odds) if odds and odds > 1 else 0.0
     except:
         return 0.0
 
 
 # =========================
-# NORMALIZE GAME (KEY FIXED)
+# SAFE NORMALIZER (FIXED CORE BUG)
 # =========================
 def normalize_game(game: dict):
 
     try:
-        raw_home = game.get("home_team")
-        raw_away = game.get("away_team")
-
-        home_team = normalize_team(raw_home)
-        away_team = normalize_team(raw_away)
-
-        if not home_team or not away_team:
+        if not isinstance(game, dict):
             return None
 
         bookmakers = game.get("bookmakers", [])
@@ -113,67 +87,53 @@ def normalize_game(game: dict):
         if not outcomes:
             return None
 
-        odds = {"home": None, "away": None, "draw": None}
-
         # -------------------------
-        # MATCH BY TEAM NAME
+        # DETECT TEAM NAMES FROM OUTCOMES ONLY
+        # (FIX: removes dependency on broken fields)
         # -------------------------
-        for o in outcomes:
-            name = normalize_team(o.get("name"))
-            price = float(o.get("price") or 2.0)
+        home = outcomes[0]
+        away = outcomes[1] if len(outcomes) > 1 else None
 
-            if "draw" in name:
-                odds["draw"] = price
-            elif name == home_team:
-                odds["home"] = price
-            elif name == away_team:
-                odds["away"] = price
-
-        # -------------------------
-        # FALLBACK
-        # -------------------------
-        fallback_prices = [float(o.get("price") or 2.0) for o in outcomes]
-
-        if odds["home"] is None and len(fallback_prices) > 0:
-            odds["home"] = fallback_prices[0]
-
-        if odds["away"] is None and len(fallback_prices) > 1:
-            odds["away"] = fallback_prices[1]
-
-        if odds["home"] is None or odds["away"] is None:
+        if not home or not away:
             return None
 
-        draw = odds["draw"] if odds["draw"] else 3.2
+        home_name = home.get("name", "").lower().strip()
+        away_name = away.get("name", "").lower().strip()
+
+        odds = {
+            "home": float(home.get("price", 2.0)),
+            "away": float(away.get("price", 2.0)),
+            "draw": None
+        }
+
+        for o in outcomes:
+            if "draw" in o.get("name", "").lower():
+                odds["draw"] = float(o.get("price", 3.2))
+
+        draw = odds["draw"] or 3.2
 
         # -------------------------
-        # IMPLIED PROBS
+        # PROBABILITIES
         # -------------------------
-        home_p = implied_prob(odds["home"])
-        draw_p = implied_prob(draw)
-        away_p = implied_prob(odds["away"])
+        h = implied_prob(odds["home"])
+        d = implied_prob(draw)
+        a = implied_prob(odds["away"])
 
-        total = home_p + draw_p + away_p
+        total = h + d + a
         if total > 0:
-            home_p /= total
-            draw_p /= total
-            away_p /= total
+            h, d, a = h / total, d / total, a / total
 
-        # =========================
-        # 🔥 CRITICAL FIX: MATCH KEY
-        # =========================
-        match_key = f"{home_team}_{away_team}"
+        match_key = f"{home_name}_{away_name}"
 
         return {
             "match_key": match_key,
-
-            "home": float(odds["home"]),
-            "draw": float(draw),
-            "away": float(odds["away"]),
-
+            "home": odds["home"],
+            "draw": draw,
+            "away": odds["away"],
             "probs": {
-                "home": round(home_p, 4),
-                "draw": round(draw_p, 4),
-                "away": round(away_p, 4)
+                "home": round(h, 4),
+                "draw": round(d, 4),
+                "away": round(a, 4)
             }
         }
 
@@ -183,7 +143,7 @@ def normalize_game(game: dict):
 
 
 # =========================
-# MAIN
+# MAIN ENTRY
 # =========================
 async def get_odds():
 
@@ -200,13 +160,4 @@ async def get_odds():
 
     raw = await fetch(params)
 
-    normalized = []
-
-    for game in raw:
-        parsed = normalize_game(game)
-        if parsed:
-            normalized.append(parsed)
-
-    logger.info(f"✅ ODDS LOADED: {len(normalized)} matches")
-
-    return normalized
+    return [g for g in (normalize_game(x) for x in raw) if g]
