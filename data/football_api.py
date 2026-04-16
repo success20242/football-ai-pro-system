@@ -1,6 +1,7 @@
 import os
 import asyncio
 import logging
+import random
 import httpx
 from dotenv import load_dotenv
 
@@ -21,11 +22,17 @@ FD_HEADERS = {
     "X-Auth-Token": FD_API_KEY
 } if FD_API_KEY else {}
 
+# =========================
+# HTTP CLIENT (FIXED)
+# =========================
 client = httpx.AsyncClient(timeout=15)
+
+# simple in-memory cache (IMPORTANT FIX)
+TEAM_CACHE = {}
 
 
 # =========================
-# SAFE FETCH (ROBUST)
+# SAFE FETCH (IMPROVED)
 # =========================
 async def fetch(url: str, params=None, retries=3):
 
@@ -40,30 +47,27 @@ async def fetch(url: str, params=None, retries=3):
                 params=params
             )
 
-            # ✅ SUCCESS
             if r.status_code == 200:
                 return r.json()
 
-            # ⚠️ RATE LIMIT
             if r.status_code == 429:
-                wait = 1.5 * (attempt + 1)
-                logger.warning(f"Rate limited → retrying in {wait}s")
+                wait = (1.5 * (attempt + 1)) + random.uniform(0.2, 1.0)
+                logger.warning(f"Rate limited → retrying in {wait:.2f}s")
                 await asyncio.sleep(wait)
                 continue
 
-            # ❌ OTHER ERRORS (log for debugging)
             logger.warning(f"API error {r.status_code} → {url}")
             return None
 
         except Exception as e:
             logger.error(f"Fetch exception: {e}")
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.5 + random.random())
 
     return None
 
 
 # =========================
-# NORMALIZE MATCH (SAFE)
+# NORMALIZE MATCH
 # =========================
 def normalize_match(m):
 
@@ -94,7 +98,7 @@ def normalize_match(m):
 
 
 # =========================
-# LIVE MATCHES (PRIMARY SOURCE)
+# LIVE MATCHES
 # =========================
 async def get_live_matches():
 
@@ -102,23 +106,14 @@ async def get_live_matches():
         logger.error("Missing FOOTBALL_DATA_API_KEY")
         return {"matches": []}
 
-    data = await fetch(
-        f"{FD_BASE}/matches",
-        params={"status": "LIVE"}
-    )
+    data = await fetch(f"{FD_BASE}/matches", params={"status": "LIVE"})
 
     if not data:
         return {"matches": []}
 
     matches = data.get("matches", []) if isinstance(data, dict) else []
 
-    cleaned = []
-    for m in matches:
-        nm = normalize_match(m)
-        if nm:
-            cleaned.append(nm)
-
-    return {"matches": cleaned}
+    return {"matches": [normalize_match(m) for m in matches if normalize_match(m)]}
 
 
 # =========================
@@ -136,23 +131,31 @@ async def get_upcoming_matches():
 
     matches = data.get("matches", []) if isinstance(data, dict) else []
 
-    cleaned = []
-    for m in matches:
-        nm = normalize_match(m)
-        if nm:
-            cleaned.append(nm)
-
-    return {"matches": cleaned}
+    return {"matches": [normalize_match(m) for m in matches if normalize_match(m)]}
 
 
 # =========================
-# TEAM STATS (SAFE)
+# TEAM STATS (CACHED FIX)
 # =========================
 async def get_team_stats(team_id: int):
 
     if not team_id or not FD_API_KEY:
         return {}
 
+    # CACHE HIT
+    if team_id in TEAM_CACHE:
+        return TEAM_CACHE[team_id]
+
     data = await fetch(f"{FD_BASE}/teams/{team_id}")
 
+    if isinstance(data, dict):
+        TEAM_CACHE[team_id] = data
+
     return data if isinstance(data, dict) else {}
+
+
+# =========================
+# CLEAN SHUTDOWN (IMPORTANT FIX)
+# =========================
+async def close_client():
+    await client.aclose()
