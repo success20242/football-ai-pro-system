@@ -4,19 +4,7 @@ from models.predict import predict
 
 
 # =========================
-# ODDS → PROBABILITY
-# =========================
-def odds_to_prob(odds: float):
-    try:
-        if not odds or odds <= 1:
-            return 0.0
-        return 1 / float(odds)
-    except Exception:
-        return 0.0
-
-
-# =========================
-# KELLY CRITERION (SAFE)
+# KELLY CRITERION (FIXED)
 # =========================
 def kelly(prob, odds):
     try:
@@ -36,7 +24,34 @@ def kelly(prob, odds):
 # EDGE CALCULATION
 # =========================
 def calc_edge(model_prob, market_prob):
-    return float(model_prob - market_prob)
+    return float(model_prob) - float(market_prob)
+
+
+# =========================
+# SAFE ODDS PARSER
+# =========================
+def extract_odds_from_match(match):
+
+    bookmakers = match.get("bookmakers", [])
+    if not bookmakers:
+        return {"home": 2.0, "draw": 3.2, "away": 2.0}
+
+    outcomes = bookmakers[0].get("markets", [])[0].get("outcomes", [])
+
+    odds = {"home": 2.0, "draw": 3.2, "away": 2.0}
+
+    for o in outcomes:
+        name = str(o.get("name", "")).lower()
+        price = o.get("price", 2.0)
+
+        if "home" in name:
+            odds["home"] = price
+        elif "away" in name:
+            odds["away"] = price
+        elif "draw" in name:
+            odds["draw"] = price
+
+    return odds
 
 
 # =========================
@@ -54,7 +69,7 @@ async def run_institutional_engine():
 
         try:
             # -------------------------
-            # MARKET PROBABILITY (FIXED PIPELINE)
+            # MARKET PROBABILITY
             # -------------------------
             market = extract_match_probs(match)
 
@@ -62,60 +77,55 @@ async def run_institutional_engine():
                 continue
 
             # -------------------------
-            # MODEL INPUT (REALISTIC)
+            # REAL MODEL INPUT (FIXED)
             # -------------------------
-            # NOTE:
-            # replace later with real feature pipeline
             features = [
-                0.5,   # placeholder form_diff
-                0.5,   # placeholder injury_diff
-                0.0    # placeholder market_edge
+                market["home"] - market["away"],  # proxy imbalance
+                market["home"],
+                market["away"]
             ]
 
             model = predict(features)
 
-            model_probs = {
-                "home": model["home_win"],
-                "draw": model["draw"],
-                "away": model["away_win"]
-            }
+            if not isinstance(model, dict):
+                continue
+
+            model_probs = model.get("probs", {})
+
+            if not model_probs:
+                continue
+
+            # -------------------------
+            # MARKET ODDS
+            # -------------------------
+            odds_map = extract_odds_from_match(match)
 
             # -------------------------
             # EDGE CALCULATION
             # -------------------------
             edges = {
-                k: calc_edge(model_probs[k], market[k])
-                for k in model_probs
+                "home": calc_edge(model_probs["home"], market["home"]),
+                "draw": calc_edge(model_probs["draw"], market["draw"]),
+                "away": calc_edge(model_probs["away"], market["away"]),
             }
 
-            best_key = max(edges, key=edges.get)
+            # -------------------------
+            # FILTER NEGATIVE EDGES (IMPORTANT FIX)
+            # -------------------------
+            valid_edges = {k: v for k, v in edges.items() if v > 0}
 
-            # -------------------------
-            # ODDS SAFE EXTRACTION
-            # -------------------------
-            bookmakers = match.get("bookmakers", [])
-            if not bookmakers:
+            if not valid_edges:
                 continue
 
-            outcomes = bookmakers[0].get("markets", [{}])[0].get("outcomes", [])
-
-            odds_map = {"home": 2.0, "draw": 3.2, "away": 2.0}
-
-            for o in outcomes:
-                name = o.get("name", "").lower()
-                price = o.get("price", 2.0)
-
-                if "home" in name:
-                    odds_map["home"] = price
-                elif "away" in name:
-                    odds_map["away"] = price
-                elif "draw" in name:
-                    odds_map["draw"] = price
+            best_key = max(valid_edges, key=valid_edges.get)
 
             # -------------------------
-            # KELLY STAKE
+            # KELLY STAKE (FIXED USAGE)
             # -------------------------
-            stake = kelly(model_probs[best_key], odds_map[best_key])
+            stake_fraction = kelly(
+                model_probs[best_key],
+                odds_map[best_key]
+            )
 
             results.append({
                 "match": match.get("id", "unknown"),
@@ -124,7 +134,7 @@ async def run_institutional_engine():
                 "odds": odds_map[best_key],
                 "model_prob": model_probs[best_key],
                 "market_prob": market[best_key],
-                "stake": float(stake)
+                "kelly_fraction": float(stake_fraction)
             })
 
         except Exception:
