@@ -2,6 +2,7 @@ import asyncio
 import joblib
 import numpy as np
 import xgboost as xgb
+
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.metrics import accuracy_score, log_loss
@@ -10,12 +11,14 @@ from features.build_dataset import build_dataset
 
 
 # =========================
-# CONFIG
+# CONFIG (UPDATED FEATURE SET)
 # =========================
 FEATURES = [
     "home_form",
     "away_form",
-    "market_edge"
+    "xg_diff",
+    "market_edge",
+    "draw_pressure"
 ]
 
 
@@ -26,9 +29,11 @@ async def main():
 
     print("🚀 Building REAL dataset...")
 
-    df = await build_dataset("PL", limit=500)
+    df = await build_dataset("PL", limit=800)
 
-    if len(df) < 100:
+    df = df.dropna()
+
+    if len(df) < 200:
         print("⚠️ Not enough real data yet.")
         return
 
@@ -38,7 +43,7 @@ async def main():
     print(f"📊 Dataset size: {len(df)}")
 
     # =========================
-    # WALK-FORWARD VALIDATION
+    # TIME SERIES VALIDATION
     # =========================
     tscv = TimeSeriesSplit(n_splits=5)
 
@@ -53,7 +58,7 @@ async def main():
         y_train, y_test = y[train_idx], y[test_idx]
 
         model = xgb.XGBClassifier(
-            max_depth=6,
+            max_depth=5,
             n_estimators=400,
             learning_rate=0.05,
             subsample=0.8,
@@ -74,17 +79,17 @@ async def main():
 
         print(f"Fold → Acc: {acc:.3f} | LogLoss: {loss:.3f}")
 
-    print("\n📊 FINAL VALIDATION RESULTS")
+    print("\n📊 FINAL RESULTS")
     print(f"Accuracy: {np.mean(scores):.3f}")
     print(f"LogLoss: {np.mean(logloss_scores):.3f}")
 
     # =========================
-    # FINAL MODEL TRAINING
+    # FINAL MODEL
     # =========================
     print("\n🏁 Training FINAL model...")
 
     final_model = xgb.XGBClassifier(
-        max_depth=6,
+        max_depth=5,
         n_estimators=500,
         learning_rate=0.05,
         subsample=0.8,
@@ -95,12 +100,12 @@ async def main():
     final_model.fit(X, y)
 
     # =========================
-    # PROBABILITY CALIBRATION
+    # PROPER CALIBRATION (FIXED)
     # =========================
     print("🎯 Calibrating probabilities...")
 
     calibrated_model = CalibratedClassifierCV(
-        final_model,
+        estimator=final_model,
         method="isotonic",
         cv=3
     )
@@ -110,7 +115,10 @@ async def main():
     # =========================
     # SAVE MODEL
     # =========================
-    joblib.dump(calibrated_model, "models/model.pkl")
+    joblib.dump({
+        "model": calibrated_model,
+        "features": FEATURES
+    }, "models/model.pkl")
 
     print("✅ MODEL TRAINED + CALIBRATED + SAVED")
 
